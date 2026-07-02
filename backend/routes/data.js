@@ -4,8 +4,10 @@ const {
   listDatabases,
   createDatabase,
   deleteDatabase,
+  reorderDatabases,
+  reorderTables,
   createTable,
-  dropTable, 
+  dropTable,
   getTableData,
   getConnection,
 } = require('../db/db');
@@ -28,6 +30,35 @@ router.post('/databases', (req, res) => {
     }
     const entry = createDatabase(name.trim(), icon);
     res.status(201).json(entry);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// PUT /api/databases/order  { orderedIds: [...] } -> sauvegarde l'ordre des bases
+router.put('/databases/order', (req, res) => {
+  try {
+    const { orderedIds } = req.body;
+    if (!Array.isArray(orderedIds)) {
+      return res.status(400).json({ error: 'orderedIds doit être un tableau.' });
+    }
+    reorderDatabases(orderedIds);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// PUT /api/:dbId/tables/order  { orderedNames: [...] } -> sauvegarde l'ordre des tables
+router.put('/:dbId/tables/order', (req, res) => {
+  try {
+    const { dbId } = req.params;
+    const { orderedNames } = req.body;
+    if (!Array.isArray(orderedNames)) {
+      return res.status(400).json({ error: 'orderedNames doit être un tableau.' });
+    }
+    reorderTables(dbId, orderedNames);
+    res.json({ success: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -63,6 +94,17 @@ router.post('/:dbId/tables', (req, res) => {
   }
 });
 
+// DELETE /api/:dbId/tables/:tableName  -> supprime une table
+router.delete('/:dbId/tables/:tableName', (req, res) => {
+  try {
+    const { dbId, tableName } = req.params;
+    dropTable(dbId, tableName);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // GET /api/:dbId/:tableName  -> contenu d'une table précise
 router.get('/:dbId/:tableName', (req, res) => {
   try {
@@ -89,17 +131,6 @@ router.post('/:dbId/:tableName', (req, res) => {
     const info = stmt.run(...Object.values(data));
 
     res.status(201).json({ success: true, id: info.lastInsertRowid });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// DELETE /api/:dbId/tables/:tableName  -> supprime une table
-router.delete('/:dbId/tables/:tableName', (req, res) => {
-  try {
-    const { dbId, tableName } = req.params;
-    dropTable(dbId, tableName);
-    res.json({ success: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

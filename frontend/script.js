@@ -38,6 +38,53 @@ async function loadTableData() {
   currentTableData = await res.json();
 }
 
+// ============================================================
+// GLISSER-DÉPOSER GÉNÉRIQUE : rend une liste réordonnable.
+// - container : élément parent (ul, div...) — on y attache les écouteurs
+//   UNE SEULE FOIS ; les items peuvent changer (rerender) sans problème
+//   grâce à la délégation d'événements (closest()).
+// - itemSelector : sélecteur CSS des éléments déplaçables
+// - direction : 'vertical' (sidebar, colonnes) ou 'horizontal' (onglets)
+// - onDrop : callback(itemsInNewOrder) appelé une fois le glisser terminé
+// ============================================================
+function enableDragReorder(container, itemSelector, direction, onDrop) {
+  let draggedEl = null;
+
+  container.addEventListener('dragstart', (e) => {
+    const item = e.target.closest(itemSelector);
+    if (!item || !container.contains(item)) return;
+    draggedEl = item;
+    item.classList.add('dragging');
+    e.dataTransfer.effectAllowed = 'move';
+  });
+
+  container.addEventListener('dragover', (e) => {
+    if (!draggedEl) return;
+    e.preventDefault();
+    const item = e.target.closest(itemSelector);
+    if (!item || item === draggedEl) return;
+
+    const rect = item.getBoundingClientRect();
+    const before = direction === 'vertical'
+      ? (e.clientY - rect.top) < rect.height / 2
+      : (e.clientX - rect.left) < rect.width / 2;
+
+    if (before) {
+      container.insertBefore(draggedEl, item);
+    } else {
+      container.insertBefore(draggedEl, item.nextSibling);
+    }
+  });
+
+  container.addEventListener('dragend', () => {
+    if (!draggedEl) return;
+    draggedEl.classList.remove('dragging');
+    draggedEl = null;
+    const items = Array.from(container.querySelectorAll(itemSelector));
+    onDrop(items);
+  });
+}
+
 function renderSidebar() {
   const list = document.getElementById('dbList');
   list.innerHTML = '';
@@ -51,6 +98,8 @@ function renderSidebar() {
     const totalRows = db.tables.reduce((s, t) => s + t.rowCount, 0);
     const li = document.createElement('li');
     li.className = 'db-item' + (currentDb && db.id === currentDb.id ? ' active' : '');
+    li.draggable = true;
+    li.dataset.dbId = db.id;
     li.innerHTML = `
       <div class="db-item-left">
         <div class="db-icon">${db.icon}</div>
@@ -66,7 +115,7 @@ function renderSidebar() {
     `;
 
     li.querySelector('.btn-delete-db').addEventListener('click', async (e) => {
-      e.stopPropagation();
+      e.stopPropagation(); // évite de sélectionner la base en cliquant sur la poubelle
       const confirmed = confirm(`Supprimer définitivement « ${db.name} » et toutes ses données ?`);
       if (!confirmed) return;
 
@@ -76,6 +125,8 @@ function renderSidebar() {
           const data = await res.json().catch(() => ({}));
           throw new Error(data.error || 'Échec de la suppression');
         }
+
+        // si la base supprimée était sélectionnée, on désélectionne
         if (currentDb && currentDb.id === db.id) {
           currentDb = null;
           currentTable = null;
@@ -115,9 +166,11 @@ function renderTabs() {
   tabsEl.innerHTML = '';
   if (!currentDb) return;
 
-   currentDb.tables.forEach(table => {
+  currentDb.tables.forEach(table => {
     const tab = document.createElement('div');
     tab.className = 'tab' + (currentTable && table.name === currentTable.name ? ' active' : '');
+    tab.draggable = true;
+    tab.dataset.tableName = table.name;
     tab.innerHTML = `<span>${table.name}</span><button class="btn-delete-tab" title="Supprimer cette table">×</button>`;
 
     tab.querySelector('span').addEventListener('click', async () => {
@@ -275,10 +328,6 @@ formNewDb.addEventListener('submit', async (e) => {
   }
 });
 
-// ============================================================
-// MODALE : créer une nouvelle table
-// ============================================================
-
 const modalNewTable = document.getElementById('modalNewTable');
 const formNewTable = document.getElementById('formNewTable');
 const errorNewTable = document.getElementById('errorNewTable');
@@ -291,6 +340,7 @@ function addColumnRow(name = '', type = 'TEXT') {
   const row = document.createElement('div');
   row.className = 'column-row';
   row.innerHTML = `
+    <span class="col-drag-handle" draggable="true" title="Glisser pour réordonner">⋮⋮</span>
     <input type="text" class="col-name" placeholder="nom de la colonne" value="${name}" required>
     <select class="col-type">
       <option value="TEXT">Texte</option>
@@ -359,5 +409,40 @@ formNewTable.addEventListener('submit', async (e) => {
     errorNewTable.textContent = err.message;
   }
 });
+
+// ============================================================
+// BRANCHEMENT DU GLISSER-DÉPOSER
+// Attaché une seule fois : les conteneurs (dbList, tabs, columnsList)
+// restent les mêmes éléments DOM même quand leur contenu est réaffiché.
+// ============================================================
+
+// 1. Réordonner les bases dans la sidebar
+enableDragReorder(document.getElementById('dbList'), '.db-item', 'vertical', (items) => {
+  const orderedIds = items.map(el => el.dataset.dbId);
+  databases.sort((a, b) => orderedIds.indexOf(a.id) - orderedIds.indexOf(b.id));
+
+  fetch('/api/databases/order', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ orderedIds })
+  }).catch(err => console.error('Échec sauvegarde ordre des bases :', err));
+});
+
+// 2. Réordonner les onglets de tables (on exclut l'onglet "+ table")
+enableDragReorder(document.getElementById('tabs'), '.tab:not(.tab-add)', 'horizontal', (items) => {
+  if (!currentDb) return;
+  const orderedNames = items.map(el => el.dataset.tableName);
+  currentDb.tables.sort((a, b) => orderedNames.indexOf(a.name) - orderedNames.indexOf(b.name));
+
+  fetch(`/api/${currentDb.id}/tables/order`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ orderedNames })
+  }).catch(err => console.error('Échec sauvegarde ordre des tables :', err));
+});
+
+// 3. Réordonner les colonnes dans le formulaire de création de table
+//    (purement visuel : l'ordre final est simplement lu dans le DOM à la soumission)
+enableDragReorder(document.getElementById('columnsList'), '.column-row', 'vertical', () => {});
 
 loadDatabases();

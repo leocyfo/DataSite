@@ -8,13 +8,13 @@ const PORT = 3000;
 
 app.use(express.json());
 
-
+// Sert le frontend (HTML/CSS/JS statiques)
 app.use(express.static(path.join(__dirname, '../frontend')));
 
-
+// Toutes les routes API liées aux données
 app.use('/api', dataRoutes);
 
-
+// Route de contrôle simple
 app.get('/api/ping', (req, res) => {
   res.json({ ok: true, databases: listDatabases().map(d => d.id) });
 });

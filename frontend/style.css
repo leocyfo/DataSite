@@ -270,6 +270,9 @@ body{
 }
 
 .tab{
+  display: flex;
+  align-items: center;
+  gap: 8px;
   padding:10px 16px;
   font-size:12px;
   font-family:var(--font-mono);
@@ -277,23 +280,6 @@ body{
   cursor:pointer;
   border-bottom:2px solid transparent;
   transition:all 0.15s ease;
-}
-
-.tab:hover{ color:var(--text); }
-
-.tab.active{
-  color:var(--accent);
-  border-bottom-color:var(--accent);
-}
-
-.tab-add{
-  color: var(--accent);
-  opacity: 0.7;
-}
-.tab{
-  display: flex;
-  align-items: center;
-  gap: 8px;
 }
 
 .btn-delete-tab{
@@ -313,6 +299,18 @@ body{
 
 .btn-delete-tab:hover{
   color: #e05a5a;
+}
+
+.tab:hover{ color:var(--text); }
+
+.tab.active{
+  color:var(--accent);
+  border-bottom-color:var(--accent);
+}
+
+.tab-add{
+  color: var(--accent);
+  opacity: 0.7;
 }
 
 .tab-add:hover{
@@ -533,7 +531,7 @@ tbody tr:hover{
 
 .column-row{
   display:grid;
-  grid-template-columns: 1fr 100px 28px;
+  grid-template-columns: 20px 1fr 100px 28px;
   gap: 6px;
   align-items:center;
 }
@@ -564,4 +562,42 @@ tbody tr:hover{
   .sidebar{
     display:none;
   }
+}
+
+/* ---------- GLISSER-DÉPOSER ---------- */
+.db-item{
+  cursor: grab;
+}
+
+.db-item.dragging{
+  opacity: 0.4;
+  cursor: grabbing;
+}
+
+.tab{
+  cursor: grab;
+}
+
+.tab.dragging{
+  opacity: 0.4;
+  cursor: grabbing;
+}
+
+.column-row.dragging{
+  opacity: 0.4;
+}
+
+.col-drag-handle{
+  cursor: grab;
+  color: var(--text-dim);
+  font-size: 13px;
+  padding: 0 2px;
+  user-select: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.col-drag-handle:active{
+  cursor: grabbing;
 }

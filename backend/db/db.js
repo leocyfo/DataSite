@@ -5,6 +5,10 @@ const path = require('path');
 const DB_DIR = __dirname;
 const REGISTRY_PATH = path.join(DB_DIR, 'registry.json');
 
+// ============================================================
+// Le registre garde la liste des bases créées (id, nom, icône,
+// fichier, ordre, ordre des tables). Stocké dans registry.json.
+// ============================================================
 
 function loadRegistry() {
   if (!fs.existsSync(REGISTRY_PATH)) return [];
@@ -40,14 +44,25 @@ function getConnection(dbId) {
 }
 
 function listDatabases() {
-  const registry = loadRegistry();
-  return registry.map(({ id, name, icon }) => {
+  const registry = loadRegistry()
+    .slice()
+    .sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+
+  return registry.map(({ id, name, icon, tableOrder }) => {
     const db = getConnection(id);
-    const tables = db.prepare(`
+    const existingTables = db.prepare(`
       SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'
     `).all().map(r => r.name);
 
-    const tableInfo = tables.map(tableName => ({
+    // applique l'ordre sauvegardé, puis ajoute à la fin les tables
+    // qui n'y figurent pas encore (nouvelles tables, robustesse)
+    const order = tableOrder || [];
+    const ordered = [
+      ...order.filter(n => existingTables.includes(n)),
+      ...existingTables.filter(n => !order.includes(n)),
+    ];
+
+    const tableInfo = ordered.map(tableName => ({
       name: tableName,
       rowCount: db.prepare(`SELECT COUNT(*) as c FROM "${tableName}"`).get().c
     }));
@@ -60,7 +75,6 @@ function createDatabase(name, icon) {
   const registry = loadRegistry();
   let id = slugify(name);
 
-  // évite les doublons d'id
   let suffix = 1;
   let uniqueId = id;
   while (registry.find(d => d.id === uniqueId)) {
@@ -71,11 +85,17 @@ function createDatabase(name, icon) {
   const file = `${id}.db`;
   const filePath = path.join(DB_DIR, file);
 
-  // crée le fichier .db (vide, sans table)
   const db = new Database(filePath);
   connections[id] = db;
 
-  const entry = { id, name, icon: icon || '🗂️', file };
+  const entry = {
+    id,
+    name,
+    icon: icon || '🗂️',
+    file,
+    order: registry.length,
+    tableOrder: [],
+  };
   registry.push(entry);
   saveRegistry(registry);
 
@@ -99,6 +119,25 @@ function deleteDatabase(dbId) {
   saveRegistry(updated);
 }
 
+// réordonne les bases selon un tableau d'ids dans le nouvel ordre voulu
+function reorderDatabases(orderedIds) {
+  const registry = loadRegistry();
+  orderedIds.forEach((id, index) => {
+    const entry = registry.find(d => d.id === id);
+    if (entry) entry.order = index;
+  });
+  saveRegistry(registry);
+}
+
+// réordonne les tables d'une base selon un tableau de noms dans le nouvel ordre
+function reorderTables(dbId, orderedNames) {
+  const registry = loadRegistry();
+  const entry = registry.find(d => d.id === dbId);
+  if (!entry) throw new Error(`Base de données inconnue: ${dbId}`);
+  entry.tableOrder = orderedNames;
+  saveRegistry(registry);
+}
+
 const VALID_TYPES = ['TEXT', 'INTEGER', 'REAL'];
 
 function createTable(dbId, tableName, columns) {
@@ -118,6 +157,15 @@ function createTable(dbId, tableName, columns) {
     )
   `);
 
+  // ajoute la nouvelle table à la fin de l'ordre sauvegardé
+  const registry = loadRegistry();
+  const entry = registry.find(d => d.id === dbId);
+  if (entry) {
+    entry.tableOrder = entry.tableOrder || [];
+    if (!entry.tableOrder.includes(safeTable)) entry.tableOrder.push(safeTable);
+    saveRegistry(registry);
+  }
+
   return { name: safeTable, rowCount: 0 };
 }
 
@@ -125,6 +173,13 @@ function dropTable(dbId, tableName) {
   const db = getConnection(dbId);
   const safeTable = tableName.replace(/[^a-zA-Z0-9_]/g, '_');
   db.exec(`DROP TABLE IF EXISTS "${safeTable}"`);
+
+  const registry = loadRegistry();
+  const entry = registry.find(d => d.id === dbId);
+  if (entry && entry.tableOrder) {
+    entry.tableOrder = entry.tableOrder.filter(n => n !== safeTable);
+    saveRegistry(registry);
+  }
 }
 
 function getTableData(dbId, tableName) {
@@ -139,7 +194,9 @@ module.exports = {
   listDatabases,
   createDatabase,
   deleteDatabase,
+  reorderDatabases,
+  reorderTables,
   createTable,
-  dropTable, 
+  dropTable,
   getTableData,
 };
