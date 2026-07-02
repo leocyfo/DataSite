@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DB Explorer — Local</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<div class="app">
+
+  <!-- SIDEBAR -->
+  <aside class="sidebar">
+    <div class="sidebar-header">
+      <div class="logo"><span class="dot"></span> DB EXPLORER</div>
+      <div class="subtitle">localhost — connexions locales</div>
+    </div>
+    <ul class="db-list" id="dbList"></ul>
+
+    <button class="btn-new-db" id="btnNewDb">+ Nouvelle base</button>
+
+    <div class="sidebar-footer" id="sidebarFooter">
+      Node.js · SQLite<br>
+      Chargement...
+    </div>
+  </aside>
+
+  <!-- MAIN -->
+  <main class="main">
+    <div class="topbar">
+      <div class="topbar-title">
+        <h1 id="dbTitle">—</h1>
+        <span class="path" id="dbPath">—</span>
+      </div>
+      <div class="topbar-stats">
+        <div class="stat">
+          <div class="val" id="statRows">0</div>
+          <div class="label">Lignes</div>
+        </div>
+        <div class="stat">
+          <div class="val" id="statTables">0</div>
+          <div class="label">Tables</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="tabs" id="tabs"></div>
+
+    <div class="content" id="content"></div>
+  </main>
+
+</div>
+
+<!-- MODALE : créer une nouvelle base -->
+<div class="modal-overlay" id="modalNewDb">
+  <div class="modal">
+    <h2>Nouvelle base de données</h2>
+    <form id="formNewDb">
+      <label>Nom de la base
+        <input type="text" id="inputDbName" placeholder="ex : projets" required autofocus>
+      </label>
+      <label>Icône (un emoji)
+        <input type="text" id="inputDbIcon" placeholder="🗂️" maxlength="2">
+      </label>
+      <p class="form-error" id="errorNewDb"></p>
+      <div class="modal-actions">
+        <button type="button" class="btn-secondary" id="cancelNewDb">Annuler</button>
+        <button type="submit" class="btn-primary">Créer</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- MODALE : créer une nouvelle table -->
+<div class="modal-overlay" id="modalNewTable">
+  <div class="modal">
+    <h2>Nouvelle table</h2>
+    <form id="formNewTable">
+      <label>Nom de la table
+        <input type="text" id="inputTableName" placeholder="ex : utilisateurs" required autofocus>
+      </label>
+
+      <div class="columns-header">
+        <span>Colonnes</span>
+        <button type="button" class="btn-add-col" id="btnAddColumn">+ Ajouter une colonne</button>
+      </div>
+      <div id="columnsList"></div>
+
+      <p class="form-error" id="errorNewTable"></p>
+      <div class="modal-actions">
+        <button type="button" class="btn-secondary" id="cancelNewTable">Annuler</button>
+        <button type="submit" class="btn-primary">Créer la table</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<script src="script.js"></script>
+</body>
+</html>
