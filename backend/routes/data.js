@@ -5,6 +5,7 @@ const {
   createDatabase,
   deleteDatabase,
   createTable,
+  dropTable, 
   getTableData,
   getConnection,
 } = require('../db/db');
@@ -88,6 +89,17 @@ router.post('/:dbId/:tableName', (req, res) => {
     const info = stmt.run(...Object.values(data));
 
     res.status(201).json({ success: true, id: info.lastInsertRowid });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// DELETE /api/:dbId/tables/:tableName  -> supprime une table
+router.delete('/:dbId/tables/:tableName', (req, res) => {
+  try {
+    const { dbId, tableName } = req.params;
+    dropTable(dbId, tableName);
+    res.json({ success: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

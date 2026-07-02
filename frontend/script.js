@@ -59,8 +59,32 @@ function renderSidebar() {
           <div class="db-sub">${db.tables.length} tables · ${totalRows} lignes</div>
         </div>
       </div>
-      <div class="db-status"></div>
+      <div class="db-item-right">
+        <div class="db-status"></div>
+        <button class="btn-delete-db" title="Supprimer cette base">🗑</button>
+      </div>
     `;
+
+    li.querySelector('.btn-delete-db').addEventListener('click', async (e) => {
+      e.stopPropagation();
+      const confirmed = confirm(`Supprimer définitivement « ${db.name} » et toutes ses données ?`);
+      if (!confirmed) return;
+
+      try {
+        const res = await fetch(`/api/databases/${db.id}`, { method: 'DELETE' });
+        if (!res.ok) {
+          const data = await res.json().catch(() => ({}));
+          throw new Error(data.error || 'Échec de la suppression');
+        }
+        if (currentDb && currentDb.id === db.id) {
+          currentDb = null;
+          currentTable = null;
+        }
+        await loadDatabases();
+      } catch (err) {
+        alert(err.message);
+      }
+    });
     li.addEventListener('click', async () => {
       currentDb = db;
       currentTable = db.tables[0] || null;
@@ -91,15 +115,37 @@ function renderTabs() {
   tabsEl.innerHTML = '';
   if (!currentDb) return;
 
-  currentDb.tables.forEach(table => {
+   currentDb.tables.forEach(table => {
     const tab = document.createElement('div');
     tab.className = 'tab' + (currentTable && table.name === currentTable.name ? ' active' : '');
-    tab.textContent = table.name;
-    tab.addEventListener('click', async () => {
+    tab.innerHTML = `<span>${table.name}</span><button class="btn-delete-tab" title="Supprimer cette table">×</button>`;
+
+    tab.querySelector('span').addEventListener('click', async () => {
       currentTable = table;
       await loadTableData();
       renderAll();
     });
+
+    tab.querySelector('.btn-delete-tab').addEventListener('click', async (e) => {
+      e.stopPropagation();
+      const confirmed = confirm(`Supprimer définitivement la table « ${table.name} » ?`);
+      if (!confirmed) return;
+
+      try {
+        const res = await fetch(`/api/${currentDb.id}/tables/${table.name}`, { method: 'DELETE' });
+        if (!res.ok) {
+          const data = await res.json().catch(() => ({}));
+          throw new Error(data.error || 'Échec de la suppression');
+        }
+        if (currentTable && currentTable.name === table.name) {
+          currentTable = null;
+        }
+        await loadDatabases();
+      } catch (err) {
+        alert(err.message);
+      }
+    });
+
     tabsEl.appendChild(tab);
   });
 

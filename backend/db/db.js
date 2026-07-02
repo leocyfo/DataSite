@@ -18,7 +18,7 @@ function saveRegistry(registry) {
 function slugify(name) {
   return name
     .toString()
-    .normalize('NFD').replace(/[\u0300-\u036f]/g, '') // enlève les accents
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
     .toLowerCase()
     .trim()
     .replace(/[^a-z0-9]+/g, '_')
@@ -121,6 +121,12 @@ function createTable(dbId, tableName, columns) {
   return { name: safeTable, rowCount: 0 };
 }
 
+function dropTable(dbId, tableName) {
+  const db = getConnection(dbId);
+  const safeTable = tableName.replace(/[^a-zA-Z0-9_]/g, '_');
+  db.exec(`DROP TABLE IF EXISTS "${safeTable}"`);
+}
+
 function getTableData(dbId, tableName) {
   const db = getConnection(dbId);
   const columns = db.prepare(`PRAGMA table_info("${tableName}")`).all().map(c => c.name);
@@ -134,5 +140,6 @@ module.exports = {
   createDatabase,
   deleteDatabase,
   createTable,
+  dropTable, 
   getTableData,
 };
