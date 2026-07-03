@@ -9,9 +9,9 @@ const {
   createTable,
   dropTable,
   getTableData,
+  insertRow,
   updateRow,
   bulkInsertRows,
-  getConnection,
 } = require('../db/db');
 
 // GET /api/databases  -> liste toutes les bases + leurs tables + nb de lignes
@@ -122,18 +122,8 @@ router.get('/:dbId/:tableName', (req, res) => {
 router.post('/:dbId/:tableName', (req, res) => {
   try {
     const { dbId, tableName } = req.params;
-    const db = getConnection(dbId);
-    const data = req.body;
-
-    const cols = Object.keys(data);
-    const placeholders = cols.map(() => '?').join(', ');
-    const colsQuoted = cols.map(c => `"${c}"`).join(', ');
-    const stmt = db.prepare(
-      `INSERT INTO "${tableName}" (${colsQuoted}) VALUES (${placeholders})`
-    );
-    const info = stmt.run(...Object.values(data));
-
-    res.status(201).json({ success: true, id: info.lastInsertRowid });
+    const { id } = insertRow(dbId, tableName, req.body);
+    res.status(201).json({ success: true, id });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
