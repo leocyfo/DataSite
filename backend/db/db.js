@@ -182,9 +182,11 @@ function dropTable(dbId, tableName) {
 function getTableData(dbId, tableName) {
   const db = getConnection(dbId);
   const safeTable = safeIdentifier(tableName);
-  const columns = db.prepare(`PRAGMA table_info("${safeTable}")`).all().map(c => c.name);
+  const columnInfo = db.prepare(`PRAGMA table_info("${safeTable}")`).all();
+  const columns = columnInfo.map(c => c.name);
+  const columnTypes = Object.fromEntries(columnInfo.map(c => [c.name, c.type]));
   const rows = db.prepare(`SELECT * FROM "${safeTable}"`).all();
-  return { columns, rows };
+  return { columns, columnTypes, rows };
 }
 
 function insertRow(dbId, tableName, data) {
@@ -202,6 +204,37 @@ function insertRow(dbId, tableName, data) {
   ).run(...values);
 
   return { id: info.lastInsertRowid };
+}
+
+function deleteRow(dbId, tableName, rowId) {
+  const db = getConnection(dbId);
+  const safeTable = safeIdentifier(tableName);
+  db.prepare(`DELETE FROM "${safeTable}" WHERE id = ?`).run(rowId);
+}
+
+function renameDatabase(dbId, newName) {
+  const registry = loadRegistry();
+  const entry = registry.find(d => d.id === dbId);
+  if (!entry) throw new Error(`Base de données inconnue: ${dbId}`);
+  entry.name = newName;
+  saveRegistry(registry);
+  return entry;
+}
+
+function renameTable(dbId, tableName, newTableName) {
+  const db = getConnection(dbId);
+  const safeTable = safeIdentifier(tableName);
+  const safeNewTable = safeIdentifier(newTableName);
+  db.exec(`ALTER TABLE "${safeTable}" RENAME TO "${safeNewTable}"`);
+
+  const registry = loadRegistry();
+  const entry = registry.find(d => d.id === dbId);
+  if (entry && entry.tableOrder) {
+    entry.tableOrder = entry.tableOrder.map(n => (n === safeTable ? safeNewTable : n));
+    saveRegistry(registry);
+  }
+
+  return { name: safeNewTable };
 }
 
 function updateRow(dbId, tableName, rowId, data) {
@@ -250,5 +283,8 @@ module.exports = {
   getTableData,
   insertRow,
   updateRow,
+  deleteRow,
+  renameDatabase,
+  renameTable,
   bulkInsertRows,
 };

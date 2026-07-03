@@ -11,6 +11,9 @@ const {
   getTableData,
   insertRow,
   updateRow,
+  deleteRow,
+  renameDatabase,
+  renameTable,
   bulkInsertRows,
 } = require('../db/db');
 
@@ -76,6 +79,20 @@ router.delete('/databases/:dbId', (req, res) => {
   }
 });
 
+// PATCH /api/databases/:dbId  { name } -> renomme une base
+router.patch('/databases/:dbId', (req, res) => {
+  try {
+    const { name } = req.body;
+    if (!name || !name.trim()) {
+      return res.status(400).json({ error: 'Le nom de la base est requis.' });
+    }
+    const entry = renameDatabase(req.params.dbId, name.trim());
+    res.json(entry);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // POST /api/:dbId/tables  { tableName, columns: [{name, type}] } -> crée une table
 router.post('/:dbId/tables', (req, res) => {
   try {
@@ -107,6 +124,23 @@ router.delete('/:dbId/tables/:tableName', (req, res) => {
   }
 });
 
+// PATCH /api/:dbId/tables/:tableName  { newName } -> renomme une table
+// (doit rester déclarée avant la route générique PATCH /:dbId/:tableName/:rowId
+// pour ne pas être masquée par elle)
+router.patch('/:dbId/tables/:tableName', (req, res) => {
+  try {
+    const { dbId, tableName } = req.params;
+    const { newName } = req.body;
+    if (!newName || !newName.trim()) {
+      return res.status(400).json({ error: 'Le nouveau nom de la table est requis.' });
+    }
+    const table = renameTable(dbId, tableName, newName.trim());
+    res.json(table);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // GET /api/:dbId/:tableName  -> contenu d'une table précise
 router.get('/:dbId/:tableName', (req, res) => {
   try {
@@ -133,6 +167,17 @@ router.patch('/:dbId/:tableName/:rowId', (req, res) => {
   try {
     const { dbId, tableName, rowId } = req.params;
     updateRow(dbId, tableName, rowId, req.body);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// DELETE /api/:dbId/:tableName/:rowId  -> supprime une ligne
+router.delete('/:dbId/:tableName/:rowId', (req, res) => {
+  try {
+    const { dbId, tableName, rowId } = req.params;
+    deleteRow(dbId, tableName, rowId);
     res.json({ success: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
