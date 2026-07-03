@@ -10,7 +10,43 @@ function escapeHtml(value) {
 let databases = [];
 let currentDb = null;
 let currentTable = null;
-let currentTableData = { columns: [], rows: [] };
+let currentTableData = { columns: [], columnTypes: {}, rows: [] };
+let searchQuery = '';
+let sortState = { column: null, dir: 'asc' };
+
+function resetTableView() {
+  searchQuery = '';
+  sortState = { column: null, dir: 'asc' };
+  const searchInput = document.getElementById('searchInput');
+  if (searchInput) searchInput.value = '';
+}
+
+function getDisplayRows() {
+  let rows = currentTableData.rows || [];
+
+  if (searchQuery) {
+    const q = searchQuery.toLowerCase();
+    rows = rows.filter(row =>
+      currentTableData.columns.some(col => String(row[col] ?? '').toLowerCase().includes(q))
+    );
+  }
+
+  if (sortState.column) {
+    const col = sortState.column;
+    const dir = sortState.dir === 'asc' ? 1 : -1;
+    rows = [...rows].sort((a, b) => {
+      const va = a[col];
+      const vb = b[col];
+      if (va == null && vb == null) return 0;
+      if (va == null) return -1 * dir;
+      if (vb == null) return 1 * dir;
+      if (typeof va === 'number' && typeof vb === 'number') return (va - vb) * dir;
+      return String(va).localeCompare(String(vb)) * dir;
+    });
+  }
+
+  return rows;
+}
 
 async function loadDatabases() {
   const res = await fetch('/api/databases');
@@ -21,21 +57,25 @@ async function loadDatabases() {
 
   if (databases.length > 0) {
     // garde la base sélectionnée si elle existe encore, sinon prend la première
-    const stillExists = currentDb && databases.find(d => d.id === currentDb.id);
-    currentDb = stillExists ? databases.find(d => d.id === currentDb.id) : databases[0];
-    currentTable = currentDb.tables[0] || null;
+    const stillExistsDb = currentDb && databases.find(d => d.id === currentDb.id);
+    currentDb = stillExistsDb ? databases.find(d => d.id === currentDb.id) : databases[0];
+
+    // garde la table sélectionnée si elle existe encore, sinon prend la première
+    const stillExistsTable = currentTable && currentDb.tables.find(t => t.name === currentTable.name);
+    currentTable = stillExistsTable ? currentDb.tables.find(t => t.name === currentTable.name) : (currentDb.tables[0] || null);
+
     await loadTableData();
   } else {
     currentDb = null;
     currentTable = null;
-    currentTableData = { columns: [], rows: [] };
+    currentTableData = { columns: [], columnTypes: {}, rows: [] };
   }
   renderAll();
 }
 
 async function loadTableData() {
   if (!currentDb || !currentTable) {
-    currentTableData = { columns: [], rows: [] };
+    currentTableData = { columns: [], columnTypes: {}, rows: [] };
     return;
   }
   const res = await fetch(`/api/${currentDb.id}/${currentTable.name}`);
@@ -105,9 +145,31 @@ function renderSidebar() {
       </div>
       <div class="db-item-right">
         <div class="db-status"></div>
+        <button class="btn-rename-db" title="Renommer cette base">✎</button>
         <button class="btn-delete-db" title="Supprimer cette base">🗑</button>
       </div>
     `;
+
+    li.querySelector('.btn-rename-db').addEventListener('click', async (e) => {
+      e.stopPropagation();
+      const newName = prompt('Nouveau nom de la base :', db.name);
+      if (!newName || !newName.trim() || newName.trim() === db.name) return;
+
+      try {
+        const res = await fetch(`/api/databases/${db.id}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name: newName.trim() })
+        });
+        if (!res.ok) {
+          const data = await res.json().catch(() => ({}));
+          throw new Error(data.error || 'Échec du renommage');
+        }
+        await loadDatabases();
+      } catch (err) {
+        alert(err.message);
+      }
+    });
 
     li.querySelector('.btn-delete-db').addEventListener('click', async (e) => {
       e.stopPropagation(); // évite de sélectionner la base en cliquant sur la poubelle
@@ -133,6 +195,7 @@ function renderSidebar() {
     li.addEventListener('click', async () => {
       currentDb = db;
       currentTable = db.tables[0] || null;
+      resetTableView();
       await loadTableData();
       renderAll();
     });
@@ -165,12 +228,37 @@ function renderTabs() {
     tab.className = 'tab' + (currentTable && table.name === currentTable.name ? ' active' : '');
     tab.draggable = true;
     tab.dataset.tableName = table.name;
-    tab.innerHTML = `<span>${escapeHtml(table.name)}</span><button class="btn-delete-tab" title="Supprimer cette table">×</button>`;
+    tab.innerHTML = `<span>${escapeHtml(table.name)}</span><button class="btn-rename-tab" title="Renommer cette table">✎</button><button class="btn-delete-tab" title="Supprimer cette table">×</button>`;
 
     tab.querySelector('span').addEventListener('click', async () => {
       currentTable = table;
+      resetTableView();
       await loadTableData();
       renderAll();
+    });
+
+    tab.querySelector('.btn-rename-tab').addEventListener('click', async (e) => {
+      e.stopPropagation();
+      const newName = prompt('Nouveau nom de la table :', table.name);
+      if (!newName || !newName.trim() || newName.trim() === table.name) return;
+
+      try {
+        const res = await fetch(`/api/${currentDb.id}/tables/${table.name}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ newName: newName.trim() })
+        });
+        if (!res.ok) {
+          const data = await res.json().catch(() => ({}));
+          throw new Error(data.error || 'Échec du renommage');
+        }
+        if (currentTable && currentTable.name === table.name) {
+          currentTable = { ...currentTable, name: newName.trim() };
+        }
+        await loadDatabases();
+      } catch (err) {
+        alert(err.message);
+      }
     });
 
     tab.querySelector('.btn-delete-tab').addEventListener('click', async (e) => {
@@ -235,9 +323,10 @@ function renderContent() {
 
   toolbar.classList.add('visible');
 
-  const { columns, rows } = currentTableData;
+  const { columns, columnTypes } = currentTableData;
+  const allRows = currentTableData.rows || [];
 
-  if (!rows || rows.length === 0) {
+  if (allRows.length === 0) {
     content.innerHTML = `
       <div class="empty-state">
         <div class="icon">∅</div>
@@ -246,8 +335,24 @@ function renderContent() {
     return;
   }
 
+  const rows = getDisplayRows();
+
+  if (rows.length === 0) {
+    content.innerHTML = `
+      <div class="empty-state">
+        <div class="icon">∅</div>
+        <div>Aucun résultat pour « ${escapeHtml(searchQuery)} »</div>
+      </div>`;
+    return;
+  }
+
   let html = '<table><thead><tr>';
-  columns.forEach(col => { html += `<th>${escapeHtml(col)}</th>`; });
+  columns.forEach(col => {
+    const isSorted = sortState.column === col;
+    const arrow = isSorted ? (sortState.dir === 'asc' ? ' ▲' : ' ▼') : '';
+    html += `<th class="sortable" data-column="${escapeHtml(col)}">${escapeHtml(col)}${arrow}</th>`;
+  });
+  html += '<th class="col-actions"></th>';
   html += '</tr></thead><tbody>';
 
   rows.forEach(row => {
@@ -260,10 +365,45 @@ function renderContent() {
       const editableAttr = isId ? '' : 'contenteditable="true"';
       html += `<td class="${cls}" data-column="${escapeHtml(col)}" ${editableAttr}>${escapeHtml(cell)}</td>`;
     });
+    html += `<td class="col-actions"><button class="btn-delete-row" title="Supprimer cette ligne">🗑</button></td>`;
     html += '</tr>';
   });
   html += '</tbody></table>';
   content.innerHTML = html;
+
+  content.querySelectorAll('thead th.sortable').forEach(th => {
+    th.addEventListener('click', () => {
+      const col = th.dataset.column;
+      if (sortState.column === col) {
+        sortState.dir = sortState.dir === 'asc' ? 'desc' : 'asc';
+      } else {
+        sortState.column = col;
+        sortState.dir = 'asc';
+      }
+      renderContent();
+    });
+  });
+
+  content.querySelectorAll('.btn-delete-row').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const rowId = btn.closest('tr').dataset.rowId;
+      const confirmed = confirm('Supprimer définitivement cette ligne ?');
+      if (!confirmed) return;
+
+      try {
+        const res = await fetch(`/api/${currentDb.id}/${currentTable.name}/${rowId}`, { method: 'DELETE' });
+        if (!res.ok) {
+          const data = await res.json().catch(() => ({}));
+          throw new Error(data.error || 'Échec de la suppression');
+        }
+        await loadDatabases();
+        await loadTableData();
+        renderAll();
+      } catch (err) {
+        alert(err.message);
+      }
+    });
+  });
 
   content.querySelectorAll('td.editable').forEach(td => {
     const original = td.textContent;
@@ -282,12 +422,24 @@ function renderContent() {
       const tr = td.closest('tr');
       const rowId = tr.dataset.rowId;
       const column = td.dataset.column;
+      const colType = columnTypes ? columnTypes[column] : undefined;
+
+      if (colType === 'INTEGER' && newValue !== '' && !/^-?\d+$/.test(newValue)) {
+        alert(`La colonne « ${column} » attend un nombre entier.`);
+        td.textContent = original;
+        return;
+      }
+      if (colType === 'REAL' && newValue !== '' && !/^-?\d+(\.\d+)?$/.test(newValue)) {
+        alert(`La colonne « ${column} » attend un nombre décimal.`);
+        td.textContent = original;
+        return;
+      }
 
       try {
         const res = await fetch(`/api/${currentDb.id}/${currentTable.name}/${rowId}`, {
           method: 'PATCH',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ [column]: newValue })
+          body: JSON.stringify({ [column]: newValue === '' ? null : newValue })
         });
         if (!res.ok) {
           const data = await res.json().catch(() => ({}));
@@ -453,8 +605,11 @@ function openNewRowModal() {
   currentTableData.columns
     .filter(col => col !== 'id')
     .forEach(col => {
+      const type = currentTableData.columnTypes ? currentTableData.columnTypes[col] : undefined;
+      const inputType = (type === 'INTEGER' || type === 'REAL') ? 'number' : 'text';
+      const stepAttr = type === 'REAL' ? ' step="any"' : '';
       const label = document.createElement('label');
-      label.innerHTML = `${escapeHtml(col)}<input type="text" class="row-field" data-column="${escapeHtml(col)}">`;
+      label.innerHTML = `${escapeHtml(col)}<input type="${inputType}" class="row-field" data-column="${escapeHtml(col)}"${stepAttr}>`;
       rowFieldsList.appendChild(label);
     });
 
@@ -479,7 +634,7 @@ formNewRow.addEventListener('submit', async (e) => {
 
   const data = {};
   rowFieldsList.querySelectorAll('.row-field').forEach(input => {
-    data[input.dataset.column] = input.value;
+    data[input.dataset.column] = input.value === '' ? null : input.value;
   });
 
   try {
@@ -582,6 +737,42 @@ document.getElementById('csvFileInput').addEventListener('change', async (e) => 
   } finally {
     e.target.value = ''; 
   }
+});
+
+function toCsv(columns, rows) {
+  const escapeCsv = (val) => {
+    const s = String(val ?? '');
+    return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  };
+  const lines = [columns.map(escapeCsv).join(',')];
+  rows.forEach(row => lines.push(columns.map(c => escapeCsv(row[c])).join(',')));
+  return lines.join('\r\n');
+}
+
+function downloadFile(filename, content, mime) {
+  const blob = new Blob([content], { type: mime });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+document.getElementById('btnExportCsv').addEventListener('click', () => {
+  if (!currentTable) return;
+  const csv = toCsv(currentTableData.columns, getDisplayRows());
+  downloadFile(`${currentTable.name}.csv`, csv, 'text/csv;charset=utf-8');
+});
+
+document.getElementById('btnExportJson').addEventListener('click', () => {
+  if (!currentTable) return;
+  downloadFile(`${currentTable.name}.json`, JSON.stringify(getDisplayRows(), null, 2), 'application/json');
+});
+
+document.getElementById('searchInput').addEventListener('input', (e) => {
+  searchQuery = e.target.value;
+  renderContent();
 });
 
 enableDragReorder(document.getElementById('dbList'), '.db-item', 'vertical', (items) => {
