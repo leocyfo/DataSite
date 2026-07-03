@@ -14,6 +14,10 @@ const {
   deleteRow,
   renameDatabase,
   renameTable,
+  addColumn,
+  renameColumn,
+  dropColumn,
+  runQuery,
   bulkInsertRows,
 } = require('../db/db');
 
@@ -136,6 +140,64 @@ router.patch('/:dbId/tables/:tableName', (req, res) => {
     }
     const table = renameTable(dbId, tableName, newName.trim());
     res.json(table);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/:dbId/:tableName/columns  { name, type } -> ajoute une colonne
+router.post('/:dbId/:tableName/columns', (req, res) => {
+  try {
+    const { dbId, tableName } = req.params;
+    const { name, type } = req.body;
+    if (!name || !name.trim()) {
+      return res.status(400).json({ error: 'Le nom de la colonne est requis.' });
+    }
+    const column = addColumn(dbId, tableName, { name: name.trim(), type });
+    res.status(201).json(column);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// PATCH /api/:dbId/:tableName/columns/:columnName  { newName } -> renomme une colonne
+router.patch('/:dbId/:tableName/columns/:columnName', (req, res) => {
+  try {
+    const { dbId, tableName, columnName } = req.params;
+    const { newName } = req.body;
+    if (!newName || !newName.trim()) {
+      return res.status(400).json({ error: 'Le nouveau nom de la colonne est requis.' });
+    }
+    const column = renameColumn(dbId, tableName, columnName, newName.trim());
+    res.json(column);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// DELETE /api/:dbId/:tableName/columns/:columnName  -> supprime une colonne
+router.delete('/:dbId/:tableName/columns/:columnName', (req, res) => {
+  try {
+    const { dbId, tableName, columnName } = req.params;
+    dropColumn(dbId, tableName, columnName);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/:dbId/query  { sql } -> exécute une requête SELECT en lecture seule
+// (doit rester déclarée avant la route générique POST /:dbId/:tableName
+// pour ne pas être masquée par elle)
+router.post('/:dbId/query', (req, res) => {
+  try {
+    const { dbId } = req.params;
+    const { sql } = req.body;
+    if (!sql || !sql.trim()) {
+      return res.status(400).json({ error: 'La requête est requise.' });
+    }
+    const result = runQuery(dbId, sql);
+    res.json(result);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

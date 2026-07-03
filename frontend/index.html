@@ -53,10 +53,14 @@
       <input type="file" id="csvFileInput" accept=".csv" hidden>
       <button class="btn-toolbar" id="btnExportCsv">⇩ CSV</button>
       <button class="btn-toolbar" id="btnExportJson">⇩ JSON</button>
+      <button class="btn-toolbar" id="btnEditColumns">⚙ Colonnes</button>
+      <button class="btn-toolbar" id="btnUndo" title="Annuler la dernière modification de cellule" disabled>↩</button>
+      <button class="btn-toolbar btn-toolbar-danger" id="btnDeleteSelected" hidden>🗑 Supprimer (0)</button>
       <input type="text" id="searchInput" class="search-input" placeholder="Rechercher...">
     </div>
 
     <div class="content" id="content"></div>
+    <div class="pagination" id="pagination"></div>
   </main>
 
 </div>
@@ -117,6 +121,46 @@
         <button type="submit" class="btn-primary">Ajouter</button>
       </div>
     </form>
+  </div>
+</div>
+
+<!-- MODALE : éditer les colonnes d'une table -->
+<div class="modal-overlay" id="modalEditColumns">
+  <div class="modal">
+    <h2>Colonnes de la table</h2>
+    <div id="editColumnsList"></div>
+
+    <div class="columns-header">
+      <span>Ajouter une colonne</span>
+    </div>
+    <form id="formAddColumn" class="inline-add-column">
+      <input type="text" id="inputNewColName" placeholder="nom de la colonne" required>
+      <select id="inputNewColType">
+        <option value="TEXT">Texte</option>
+        <option value="INTEGER">Entier</option>
+        <option value="REAL">Décimal</option>
+      </select>
+      <button type="submit" class="btn-primary">+ Ajouter</button>
+    </form>
+
+    <p class="form-error" id="errorEditColumns"></p>
+    <div class="modal-actions">
+      <button type="button" class="btn-secondary" id="closeEditColumns">Fermer</button>
+    </div>
+  </div>
+</div>
+
+<!-- MODALE : requête SQL en lecture seule -->
+<div class="modal-overlay" id="modalQuery">
+  <div class="modal modal-wide">
+    <h2>Requête SQL (lecture seule)</h2>
+    <textarea id="queryInput" class="query-textarea" rows="4" placeholder="SELECT * FROM ma_table WHERE ..."></textarea>
+    <div class="modal-actions">
+      <button type="button" class="btn-secondary" id="closeQuery">Fermer</button>
+      <button type="button" class="btn-primary" id="btnRunQuery">Exécuter</button>
+    </div>
+    <p class="form-error" id="errorQuery"></p>
+    <div id="queryResults" class="query-results"></div>
   </div>
 </div>
 

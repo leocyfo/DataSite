@@ -13,12 +13,42 @@ let currentTable = null;
 let currentTableData = { columns: [], columnTypes: {}, rows: [] };
 let searchQuery = '';
 let sortState = { column: null, dir: 'asc' };
+let currentPage = 1;
+const PAGE_SIZE = 50;
+let selectedRowIds = new Set();
+let undoStack = [];
+const UNDO_LIMIT = 20;
 
 function resetTableView() {
   searchQuery = '';
   sortState = { column: null, dir: 'asc' };
+  currentPage = 1;
+  selectedRowIds = new Set();
+  undoStack = [];
   const searchInput = document.getElementById('searchInput');
   if (searchInput) searchInput.value = '';
+  updateUndoButton();
+  updateSelectionUi();
+}
+
+function updateUndoButton() {
+  const btn = document.getElementById('btnUndo');
+  if (!btn) return;
+  btn.disabled = undoStack.length === 0;
+  btn.title = undoStack.length
+    ? `Annuler la dernière modification de cellule (${undoStack.length} en mémoire)`
+    : 'Annuler la dernière modification de cellule';
+}
+
+function updateSelectionUi() {
+  const btn = document.getElementById('btnDeleteSelected');
+  if (!btn) return;
+  if (selectedRowIds.size === 0) {
+    btn.hidden = true;
+  } else {
+    btn.hidden = false;
+    btn.textContent = `🗑 Supprimer (${selectedRowIds.size})`;
+  }
 }
 
 function getDisplayRows() {
@@ -289,14 +319,22 @@ function renderTabs() {
   addTab.textContent = '+ table';
   addTab.addEventListener('click', openNewTableModal);
   tabsEl.appendChild(addTab);
+
+  const queryTab = document.createElement('div');
+  queryTab.className = 'tab tab-add';
+  queryTab.textContent = '🖥 SQL';
+  queryTab.addEventListener('click', openQueryModal);
+  tabsEl.appendChild(queryTab);
 }
 
 function renderContent() {
   const content = document.getElementById('content');
   const toolbar = document.getElementById('contentToolbar');
+  const pagination = document.getElementById('pagination');
 
   if (!currentDb) {
     toolbar.classList.remove('visible');
+    pagination.innerHTML = '';
     content.innerHTML = `
       <div class="empty-state">
         <div class="icon">🗂️</div>
@@ -310,6 +348,7 @@ function renderContent() {
 
   if (!currentTable) {
     toolbar.classList.remove('visible');
+    pagination.innerHTML = '';
     content.innerHTML = `
       <div class="empty-state">
         <div class="icon">∅</div>
@@ -327,6 +366,7 @@ function renderContent() {
   const allRows = currentTableData.rows || [];
 
   if (allRows.length === 0) {
+    pagination.innerHTML = '';
     content.innerHTML = `
       <div class="empty-state">
         <div class="icon">∅</div>
@@ -335,9 +375,10 @@ function renderContent() {
     return;
   }
 
-  const rows = getDisplayRows();
+  const filteredRows = getDisplayRows();
 
-  if (rows.length === 0) {
+  if (filteredRows.length === 0) {
+    pagination.innerHTML = '';
     content.innerHTML = `
       <div class="empty-state">
         <div class="icon">∅</div>
@@ -346,7 +387,14 @@ function renderContent() {
     return;
   }
 
+  const totalPages = Math.max(1, Math.ceil(filteredRows.length / PAGE_SIZE));
+  currentPage = Math.min(Math.max(1, currentPage), totalPages);
+  const pageRows = filteredRows.slice((currentPage - 1) * PAGE_SIZE, currentPage * PAGE_SIZE);
+  const pageRowIds = pageRows.map(r => String(r.id));
+  const allPageSelected = pageRowIds.length > 0 && pageRowIds.every(id => selectedRowIds.has(id));
+
   let html = '<table><thead><tr>';
+  html += `<th class="col-select"><input type="checkbox" id="selectAllCheckbox" ${allPageSelected ? 'checked' : ''}></th>`;
   columns.forEach(col => {
     const isSorted = sortState.column === col;
     const arrow = isSorted ? (sortState.dir === 'asc' ? ' ▲' : ' ▼') : '';
@@ -355,8 +403,11 @@ function renderContent() {
   html += '<th class="col-actions"></th>';
   html += '</tr></thead><tbody>';
 
-  rows.forEach(row => {
-    html += `<tr data-row-id="${escapeHtml(row.id)}">`;
+  pageRows.forEach(row => {
+    const rowId = String(row.id);
+    const isSelected = selectedRowIds.has(rowId);
+    html += `<tr data-row-id="${escapeHtml(rowId)}"${isSelected ? ' class="row-selected"' : ''}>`;
+    html += `<td class="col-select"><input type="checkbox" class="row-select" ${isSelected ? 'checked' : ''}></td>`;
     columns.forEach((col, i) => {
       const cell = row[col] ?? '';
       const isId = col === 'id';
@@ -371,6 +422,8 @@ function renderContent() {
   html += '</tbody></table>';
   content.innerHTML = html;
 
+  renderPagination(totalPages, filteredRows.length);
+
   content.querySelectorAll('thead th.sortable').forEach(th => {
     th.addEventListener('click', () => {
       const col = th.dataset.column;
@@ -380,7 +433,35 @@ function renderContent() {
         sortState.column = col;
         sortState.dir = 'asc';
       }
+      currentPage = 1;
       renderContent();
+    });
+  });
+
+  const selectAllCheckbox = document.getElementById('selectAllCheckbox');
+  if (selectAllCheckbox) {
+    selectAllCheckbox.addEventListener('change', () => {
+      if (selectAllCheckbox.checked) {
+        pageRowIds.forEach(id => selectedRowIds.add(id));
+      } else {
+        pageRowIds.forEach(id => selectedRowIds.delete(id));
+      }
+      updateSelectionUi();
+      renderContent();
+    });
+  }
+
+  content.querySelectorAll('tbody tr').forEach(tr => {
+    const checkbox = tr.querySelector('.row-select');
+    checkbox.addEventListener('change', () => {
+      const rowId = tr.dataset.rowId;
+      if (checkbox.checked) {
+        selectedRowIds.add(rowId);
+      } else {
+        selectedRowIds.delete(rowId);
+      }
+      updateSelectionUi();
+      tr.classList.toggle('row-selected', checkbox.checked);
     });
   });
 
@@ -396,6 +477,8 @@ function renderContent() {
           const data = await res.json().catch(() => ({}));
           throw new Error(data.error || 'Échec de la suppression');
         }
+        selectedRowIds.delete(rowId);
+        updateSelectionUi();
         await loadDatabases();
         await loadTableData();
         renderAll();
@@ -445,6 +528,9 @@ function renderContent() {
           const data = await res.json().catch(() => ({}));
           throw new Error(data.error || 'Échec de la sauvegarde');
         }
+        undoStack.push({ dbId: currentDb.id, tableName: currentTable.name, rowId, column, oldValue: original });
+        if (undoStack.length > UNDO_LIMIT) undoStack.shift();
+        updateUndoButton();
         td.classList.add('saved');
         setTimeout(() => td.classList.remove('saved'), 600);
       } catch (err) {
@@ -452,6 +538,27 @@ function renderContent() {
         td.textContent = original;
       }
     });
+  });
+}
+
+function renderPagination(totalPages, totalRows) {
+  const pagination = document.getElementById('pagination');
+  if (totalPages <= 1) {
+    pagination.innerHTML = '';
+    return;
+  }
+
+  pagination.innerHTML = `
+    <button class="btn-page" id="btnPrevPage" ${currentPage === 1 ? 'disabled' : ''}>‹ Précédent</button>
+    <span class="page-info">Page ${currentPage} / ${totalPages} · ${totalRows} lignes</span>
+    <button class="btn-page" id="btnNextPage" ${currentPage === totalPages ? 'disabled' : ''}>Suivant ›</button>
+  `;
+
+  document.getElementById('btnPrevPage').addEventListener('click', () => {
+    if (currentPage > 1) { currentPage--; renderContent(); }
+  });
+  document.getElementById('btnNextPage').addEventListener('click', () => {
+    if (currentPage < totalPages) { currentPage++; renderContent(); }
   });
 }
 
@@ -739,6 +846,174 @@ document.getElementById('csvFileInput').addEventListener('change', async (e) => 
   }
 });
 
+const modalEditColumns = document.getElementById('modalEditColumns');
+const editColumnsList = document.getElementById('editColumnsList');
+const errorEditColumns = document.getElementById('errorEditColumns');
+const formAddColumn = document.getElementById('formAddColumn');
+
+function renderEditColumnsList() {
+  editColumnsList.innerHTML = '';
+
+  currentTableData.columns.filter(c => c !== 'id').forEach(col => {
+    const type = currentTableData.columnTypes ? currentTableData.columnTypes[col] : 'TEXT';
+    const row = document.createElement('div');
+    row.className = 'edit-column-row';
+    row.innerHTML = `
+      <input type="text" class="edit-col-name" value="${escapeHtml(col)}">
+      <span class="edit-col-type">${escapeHtml(type)}</span>
+      <button type="button" class="btn-save-col" title="Renommer">✓</button>
+      <button type="button" class="btn-remove-col" title="Supprimer la colonne">×</button>
+    `;
+
+    row.querySelector('.btn-save-col').addEventListener('click', async () => {
+      const input = row.querySelector('.edit-col-name');
+      const newName = input.value.trim();
+      if (!newName || newName === col) return;
+
+      try {
+        const res = await fetch(`/api/${currentDb.id}/${currentTable.name}/columns/${col}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ newName })
+        });
+        if (!res.ok) {
+          const data = await res.json().catch(() => ({}));
+          throw new Error(data.error || 'Échec du renommage');
+        }
+        errorEditColumns.textContent = '';
+        await loadTableData();
+        renderEditColumnsList();
+        renderContent();
+      } catch (err) {
+        errorEditColumns.textContent = err.message;
+      }
+    });
+
+    row.querySelector('.btn-remove-col').addEventListener('click', async () => {
+      const confirmed = confirm(`Supprimer définitivement la colonne « ${col} » et ses données ?`);
+      if (!confirmed) return;
+
+      try {
+        const res = await fetch(`/api/${currentDb.id}/${currentTable.name}/columns/${col}`, { method: 'DELETE' });
+        if (!res.ok) {
+          const data = await res.json().catch(() => ({}));
+          throw new Error(data.error || 'Échec de la suppression');
+        }
+        errorEditColumns.textContent = '';
+        await loadTableData();
+        renderEditColumnsList();
+        renderContent();
+      } catch (err) {
+        errorEditColumns.textContent = err.message;
+      }
+    });
+
+    editColumnsList.appendChild(row);
+  });
+}
+
+function openEditColumnsModal() {
+  if (!currentTable) return;
+  errorEditColumns.textContent = '';
+  formAddColumn.reset();
+  renderEditColumnsList();
+  modalEditColumns.classList.add('open');
+}
+
+function closeEditColumnsModal() {
+  modalEditColumns.classList.remove('open');
+}
+
+document.getElementById('btnEditColumns').addEventListener('click', openEditColumnsModal);
+document.getElementById('closeEditColumns').addEventListener('click', closeEditColumnsModal);
+modalEditColumns.addEventListener('click', (e) => {
+  if (e.target === modalEditColumns) closeEditColumnsModal();
+});
+
+formAddColumn.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  errorEditColumns.textContent = '';
+
+  const name = document.getElementById('inputNewColName').value.trim();
+  const type = document.getElementById('inputNewColType').value;
+  if (!name) return;
+
+  try {
+    const res = await fetch(`/api/${currentDb.id}/${currentTable.name}/columns`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, type })
+    });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.error || "Échec de l'ajout");
+    }
+    formAddColumn.reset();
+    await loadTableData();
+    renderEditColumnsList();
+    renderContent();
+  } catch (err) {
+    errorEditColumns.textContent = err.message;
+  }
+});
+
+const modalQuery = document.getElementById('modalQuery');
+const queryInput = document.getElementById('queryInput');
+const errorQuery = document.getElementById('errorQuery');
+const queryResults = document.getElementById('queryResults');
+
+function openQueryModal() {
+  if (!currentDb) return;
+  errorQuery.textContent = '';
+  queryResults.innerHTML = '';
+  modalQuery.classList.add('open');
+  queryInput.focus();
+}
+
+function closeQueryModal() {
+  modalQuery.classList.remove('open');
+}
+
+document.getElementById('closeQuery').addEventListener('click', closeQueryModal);
+modalQuery.addEventListener('click', (e) => {
+  if (e.target === modalQuery) closeQueryModal();
+});
+
+document.getElementById('btnRunQuery').addEventListener('click', async () => {
+  const sql = queryInput.value.trim();
+  errorQuery.textContent = '';
+  queryResults.innerHTML = '';
+  if (!sql || !currentDb) return;
+
+  try {
+    const res = await fetch(`/api/${currentDb.id}/query`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sql })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Erreur inconnue');
+
+    if (data.rows.length === 0) {
+      queryResults.innerHTML = '<div class="query-empty">Aucun résultat.</div>';
+      return;
+    }
+
+    let html = '<table><thead><tr>';
+    data.columns.forEach(col => { html += `<th>${escapeHtml(col)}</th>`; });
+    html += '</tr></thead><tbody>';
+    data.rows.forEach(row => {
+      html += '<tr>';
+      data.columns.forEach(col => { html += `<td>${escapeHtml(row[col])}</td>`; });
+      html += '</tr>';
+    });
+    html += '</tbody></table>';
+    queryResults.innerHTML = html;
+  } catch (err) {
+    errorQuery.textContent = err.message;
+  }
+});
+
 function toCsv(columns, rows) {
   const escapeCsv = (val) => {
     const s = String(val ?? '');
@@ -759,20 +1034,71 @@ function downloadFile(filename, content, mime) {
   URL.revokeObjectURL(url);
 }
 
+function getExportRows() {
+  const rows = getDisplayRows();
+  if (selectedRowIds.size > 0) return rows.filter(r => selectedRowIds.has(String(r.id)));
+  return rows;
+}
+
 document.getElementById('btnExportCsv').addEventListener('click', () => {
   if (!currentTable) return;
-  const csv = toCsv(currentTableData.columns, getDisplayRows());
+  const csv = toCsv(currentTableData.columns, getExportRows());
   downloadFile(`${currentTable.name}.csv`, csv, 'text/csv;charset=utf-8');
 });
 
 document.getElementById('btnExportJson').addEventListener('click', () => {
   if (!currentTable) return;
-  downloadFile(`${currentTable.name}.json`, JSON.stringify(getDisplayRows(), null, 2), 'application/json');
+  downloadFile(`${currentTable.name}.json`, JSON.stringify(getExportRows(), null, 2), 'application/json');
 });
 
 document.getElementById('searchInput').addEventListener('input', (e) => {
   searchQuery = e.target.value;
+  currentPage = 1;
   renderContent();
+});
+
+document.getElementById('btnDeleteSelected').addEventListener('click', async () => {
+  if (!currentDb || !currentTable || selectedRowIds.size === 0) return;
+  const ids = Array.from(selectedRowIds);
+  const confirmed = confirm(`Supprimer définitivement ${ids.length} ligne(s) sélectionnée(s) ?`);
+  if (!confirmed) return;
+
+  try {
+    const results = await Promise.all(ids.map(id =>
+      fetch(`/api/${currentDb.id}/${currentTable.name}/${id}`, { method: 'DELETE' })
+    ));
+    const failed = results.filter(r => !r.ok).length;
+    selectedRowIds = new Set();
+    updateSelectionUi();
+    await loadDatabases();
+    await loadTableData();
+    renderAll();
+    if (failed > 0) alert(`${failed} suppression(s) ont échoué.`);
+  } catch (err) {
+    alert(err.message);
+  }
+});
+
+document.getElementById('btnUndo').addEventListener('click', async () => {
+  const last = undoStack.pop();
+  updateUndoButton();
+  if (!last) return;
+
+  try {
+    const res = await fetch(`/api/${last.dbId}/${last.tableName}/${last.rowId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ [last.column]: last.oldValue === '' ? null : last.oldValue })
+    });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.error || 'Échec de l\'annulation');
+    }
+    await loadTableData();
+    renderAll();
+  } catch (err) {
+    alert(err.message);
+  }
 });
 
 enableDragReorder(document.getElementById('dbList'), '.db-item', 'vertical', (items) => {
