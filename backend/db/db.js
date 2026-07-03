@@ -135,6 +135,63 @@ function reorderTables(dbId, orderedNames) {
   saveRegistry(registry);
 }
 
+function getRelations(dbId) {
+  const registry = loadRegistry();
+  const entry = registry.find(d => d.id === dbId);
+  return (entry && entry.relations) || [];
+}
+
+function getTableRelations(dbId, tableName) {
+  const db = getConnection(dbId);
+  const safeTable = safeIdentifier(tableName);
+
+  return getRelations(dbId).filter(r => {
+    if (r.table !== safeTable) return false;
+    // ignore les relations orphelines (table/colonnes référencées disparues)
+    const refCols = db.prepare(`PRAGMA table_info("${r.refTable}")`).all().map(c => c.name);
+    return refCols.includes(r.refColumn) && refCols.includes(r.refDisplay);
+  });
+}
+
+function setRelation(dbId, table, column, refTable, refColumn, refDisplay) {
+  const db = getConnection(dbId);
+  const safeTable = safeIdentifier(table);
+  const safeCol = safeIdentifier(column);
+  const safeRefTable = safeIdentifier(refTable);
+  const safeRefColumn = safeIdentifier(refColumn);
+  const safeRefDisplay = safeIdentifier(refDisplay || refColumn);
+
+  const tableCols = db.prepare(`PRAGMA table_info("${safeTable}")`).all().map(c => c.name);
+  if (!tableCols.includes(safeCol)) throw new Error(`Colonne inconnue: ${safeCol}`);
+
+  const refCols = db.prepare(`PRAGMA table_info("${safeRefTable}")`).all().map(c => c.name);
+  if (refCols.length === 0) throw new Error(`Table référencée inconnue: ${safeRefTable}`);
+  if (!refCols.includes(safeRefColumn)) throw new Error(`Colonne référencée inconnue: ${safeRefColumn}`);
+  if (!refCols.includes(safeRefDisplay)) throw new Error(`Colonne d'affichage inconnue: ${safeRefDisplay}`);
+
+  const registry = loadRegistry();
+  const entry = registry.find(d => d.id === dbId);
+  if (!entry) throw new Error(`Base de données inconnue: ${dbId}`);
+
+  entry.relations = (entry.relations || []).filter(r => !(r.table === safeTable && r.column === safeCol));
+  const relation = { table: safeTable, column: safeCol, refTable: safeRefTable, refColumn: safeRefColumn, refDisplay: safeRefDisplay };
+  entry.relations.push(relation);
+  saveRegistry(registry);
+
+  return relation;
+}
+
+function removeRelation(dbId, table, column) {
+  const registry = loadRegistry();
+  const entry = registry.find(d => d.id === dbId);
+  if (!entry) throw new Error(`Base de données inconnue: ${dbId}`);
+
+  const safeTable = safeIdentifier(table);
+  const safeCol = safeIdentifier(column);
+  entry.relations = (entry.relations || []).filter(r => !(r.table === safeTable && r.column === safeCol));
+  saveRegistry(registry);
+}
+
 const VALID_TYPES = ['TEXT', 'INTEGER', 'REAL'];
 
 function createTable(dbId, tableName, columns) {
@@ -173,8 +230,13 @@ function dropTable(dbId, tableName) {
 
   const registry = loadRegistry();
   const entry = registry.find(d => d.id === dbId);
-  if (entry && entry.tableOrder) {
-    entry.tableOrder = entry.tableOrder.filter(n => n !== safeTable);
+  if (entry) {
+    if (entry.tableOrder) {
+      entry.tableOrder = entry.tableOrder.filter(n => n !== safeTable);
+    }
+    if (entry.relations) {
+      entry.relations = entry.relations.filter(r => r.table !== safeTable && r.refTable !== safeTable);
+    }
     saveRegistry(registry);
   }
 }
@@ -186,7 +248,16 @@ function getTableData(dbId, tableName) {
   const columns = columnInfo.map(c => c.name);
   const columnTypes = Object.fromEntries(columnInfo.map(c => [c.name, c.type]));
   const rows = db.prepare(`SELECT * FROM "${safeTable}"`).all();
-  return { columns, columnTypes, rows };
+
+  const relations = getTableRelations(dbId, tableName);
+  const relationOptions = {};
+  relations.forEach(rel => {
+    relationOptions[rel.column] = db.prepare(
+      `SELECT "${rel.refColumn}" as id, "${rel.refDisplay}" as label FROM "${rel.refTable}"`
+    ).all();
+  });
+
+  return { columns, columnTypes, rows, relations, relationOptions };
 }
 
 function insertRow(dbId, tableName, data) {
@@ -229,8 +300,17 @@ function renameTable(dbId, tableName, newTableName) {
 
   const registry = loadRegistry();
   const entry = registry.find(d => d.id === dbId);
-  if (entry && entry.tableOrder) {
-    entry.tableOrder = entry.tableOrder.map(n => (n === safeTable ? safeNewTable : n));
+  if (entry) {
+    if (entry.tableOrder) {
+      entry.tableOrder = entry.tableOrder.map(n => (n === safeTable ? safeNewTable : n));
+    }
+    if (entry.relations) {
+      entry.relations = entry.relations.map(r => ({
+        ...r,
+        table: r.table === safeTable ? safeNewTable : r.table,
+        refTable: r.refTable === safeTable ? safeNewTable : r.refTable,
+      }));
+    }
     saveRegistry(registry);
   }
 
@@ -252,6 +332,19 @@ function renameColumn(dbId, tableName, columnName, newColumnName) {
   const safeCol = safeIdentifier(columnName);
   const safeNewCol = safeIdentifier(newColumnName);
   db.exec(`ALTER TABLE "${safeTable}" RENAME COLUMN "${safeCol}" TO "${safeNewCol}"`);
+
+  const registry = loadRegistry();
+  const entry = registry.find(d => d.id === dbId);
+  if (entry && entry.relations) {
+    entry.relations = entry.relations.map(r => ({
+      ...r,
+      column: (r.table === safeTable && r.column === safeCol) ? safeNewCol : r.column,
+      refColumn: (r.refTable === safeTable && r.refColumn === safeCol) ? safeNewCol : r.refColumn,
+      refDisplay: (r.refTable === safeTable && r.refDisplay === safeCol) ? safeNewCol : r.refDisplay,
+    }));
+    saveRegistry(registry);
+  }
+
   return { name: safeNewCol };
 }
 
@@ -260,6 +353,16 @@ function dropColumn(dbId, tableName, columnName) {
   const safeTable = safeIdentifier(tableName);
   const safeCol = safeIdentifier(columnName);
   db.exec(`ALTER TABLE "${safeTable}" DROP COLUMN "${safeCol}"`);
+
+  const registry = loadRegistry();
+  const entry = registry.find(d => d.id === dbId);
+  if (entry && entry.relations) {
+    entry.relations = entry.relations.filter(r =>
+      !(r.table === safeTable && r.column === safeCol) &&
+      !(r.refTable === safeTable && (r.refColumn === safeCol || r.refDisplay === safeCol))
+    );
+    saveRegistry(registry);
+  }
 }
 
 function runQuery(dbId, sql) {
@@ -333,4 +436,8 @@ module.exports = {
   dropColumn,
   runQuery,
   bulkInsertRows,
+  getRelations,
+  getTableRelations,
+  setRelation,
+  removeRelation,
 };

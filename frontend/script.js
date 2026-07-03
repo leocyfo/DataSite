@@ -51,13 +51,25 @@ function updateSelectionUi() {
   }
 }
 
+function resolveRelationLabel(col, value) {
+  const relation = (currentTableData.relations || []).find(r => r.column === col);
+  if (!relation || value == null) return null;
+  const options = (currentTableData.relationOptions && currentTableData.relationOptions[col]) || [];
+  const match = options.find(o => String(o.id) === String(value));
+  return match ? match.label : null;
+}
+
 function getDisplayRows() {
   let rows = currentTableData.rows || [];
 
   if (searchQuery) {
     const q = searchQuery.toLowerCase();
     rows = rows.filter(row =>
-      currentTableData.columns.some(col => String(row[col] ?? '').toLowerCase().includes(q))
+      currentTableData.columns.some(col => {
+        if (String(row[col] ?? '').toLowerCase().includes(q)) return true;
+        const label = resolveRelationLabel(col, row[col]);
+        return label != null && String(label).toLowerCase().includes(q);
+      })
     );
   }
 
@@ -411,6 +423,20 @@ function renderContent() {
     columns.forEach((col, i) => {
       const cell = row[col] ?? '';
       const isId = col === 'id';
+      const relation = (currentTableData.relations || []).find(r => r.column === col);
+
+      if (relation) {
+        const options = (currentTableData.relationOptions && currentTableData.relationOptions[col]) || [];
+        html += `<td class="rel-cell" data-column="${escapeHtml(col)}"><select class="rel-select">`;
+        html += `<option value="">—</option>`;
+        options.forEach(opt => {
+          const isSelected = cell !== '' && String(opt.id) === String(cell);
+          html += `<option value="${escapeHtml(opt.id)}"${isSelected ? ' selected' : ''}>${escapeHtml(opt.label)}</option>`;
+        });
+        html += `</select></td>`;
+        return;
+      }
+
       const isNum = !isId && typeof row[col] === 'number';
       const cls = isId ? 'col-id' : `editable ${isNum ? 'cell-num' : (i === 0 ? 'cell-dim' : '')}`;
       const editableAttr = isId ? '' : 'contenteditable="true"';
@@ -484,6 +510,35 @@ function renderContent() {
         renderAll();
       } catch (err) {
         alert(err.message);
+      }
+    });
+  });
+
+  content.querySelectorAll('td.rel-cell select.rel-select').forEach(select => {
+    const original = select.value;
+
+    select.addEventListener('change', async () => {
+      const newValue = select.value;
+      const tr = select.closest('tr');
+      const rowId = tr.dataset.rowId;
+      const column = select.closest('td').dataset.column;
+
+      try {
+        const res = await fetch(`/api/${currentDb.id}/${currentTable.name}/${rowId}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ [column]: newValue === '' ? null : newValue })
+        });
+        if (!res.ok) {
+          const data = await res.json().catch(() => ({}));
+          throw new Error(data.error || 'Échec de la sauvegarde');
+        }
+        undoStack.push({ dbId: currentDb.id, tableName: currentTable.name, rowId, column, oldValue: original });
+        if (undoStack.length > UNDO_LIMIT) undoStack.shift();
+        updateUndoButton();
+      } catch (err) {
+        alert(err.message);
+        select.value = original;
       }
     });
   });
@@ -712,11 +767,24 @@ function openNewRowModal() {
   currentTableData.columns
     .filter(col => col !== 'id')
     .forEach(col => {
-      const type = currentTableData.columnTypes ? currentTableData.columnTypes[col] : undefined;
-      const inputType = (type === 'INTEGER' || type === 'REAL') ? 'number' : 'text';
-      const stepAttr = type === 'REAL' ? ' step="any"' : '';
+      const relation = (currentTableData.relations || []).find(r => r.column === col);
       const label = document.createElement('label');
-      label.innerHTML = `${escapeHtml(col)}<input type="${inputType}" class="row-field" data-column="${escapeHtml(col)}"${stepAttr}>`;
+
+      if (relation) {
+        const options = (currentTableData.relationOptions && currentTableData.relationOptions[col]) || [];
+        let selectHtml = `<select class="row-field" data-column="${escapeHtml(col)}"><option value="">—</option>`;
+        options.forEach(opt => {
+          selectHtml += `<option value="${escapeHtml(opt.id)}">${escapeHtml(opt.label)}</option>`;
+        });
+        selectHtml += `</select>`;
+        label.innerHTML = `${escapeHtml(col)}${selectHtml}`;
+      } else {
+        const type = currentTableData.columnTypes ? currentTableData.columnTypes[col] : undefined;
+        const inputType = (type === 'INTEGER' || type === 'REAL') ? 'number' : 'text';
+        const stepAttr = type === 'REAL' ? ' step="any"' : '';
+        label.innerHTML = `${escapeHtml(col)}<input type="${inputType}" class="row-field" data-column="${escapeHtml(col)}"${stepAttr}>`;
+      }
+
       rowFieldsList.appendChild(label);
     });
 
@@ -851,19 +919,120 @@ const editColumnsList = document.getElementById('editColumnsList');
 const errorEditColumns = document.getElementById('errorEditColumns');
 const formAddColumn = document.getElementById('formAddColumn');
 
+async function fetchTableColumns(dbId, tableName) {
+  const res = await fetch(`/api/${dbId}/${tableName}`);
+  if (!res.ok) return [];
+  const data = await res.json();
+  return data.columns || [];
+}
+
 function renderEditColumnsList() {
   editColumnsList.innerHTML = '';
 
   currentTableData.columns.filter(c => c !== 'id').forEach(col => {
     const type = currentTableData.columnTypes ? currentTableData.columnTypes[col] : 'TEXT';
+    const relation = (currentTableData.relations || []).find(r => r.column === col);
+
+    const block = document.createElement('div');
+    block.className = 'edit-column-block';
+
     const row = document.createElement('div');
     row.className = 'edit-column-row';
     row.innerHTML = `
       <input type="text" class="edit-col-name" value="${escapeHtml(col)}">
       <span class="edit-col-type">${escapeHtml(type)}</span>
+      <button type="button" class="btn-link-col${relation ? ' linked' : ''}" title="${relation ? `Lié à ${relation.refTable}.${relation.refColumn}` : 'Lier à une autre table'}">🔗</button>
       <button type="button" class="btn-save-col" title="Renommer">✓</button>
       <button type="button" class="btn-remove-col" title="Supprimer la colonne">×</button>
     `;
+
+    const relPanel = document.createElement('div');
+    relPanel.className = 'rel-panel';
+    relPanel.hidden = !relation;
+    const otherTables = (currentDb.tables || []).map(t => t.name).filter(n => n !== currentTable.name);
+    relPanel.innerHTML = `
+      <select class="rel-ref-table">
+        <option value="">— Aucune liaison —</option>
+        ${otherTables.map(t => `<option value="${escapeHtml(t)}"${relation && relation.refTable === t ? ' selected' : ''}>${escapeHtml(t)}</option>`).join('')}
+      </select>
+      <select class="rel-ref-column"></select>
+      <select class="rel-ref-display"></select>
+      <button type="button" class="btn-save-rel" title="Enregistrer la liaison">✓</button>
+    `;
+
+    async function populateRefSelects(refTable) {
+      const colSelect = relPanel.querySelector('.rel-ref-column');
+      const dispSelect = relPanel.querySelector('.rel-ref-display');
+      colSelect.innerHTML = '';
+      dispSelect.innerHTML = '';
+      if (!refTable) return;
+
+      const refCols = await fetchTableColumns(currentDb.id, refTable);
+      refCols.forEach(c => {
+        const opt1 = document.createElement('option');
+        opt1.value = c;
+        opt1.textContent = c;
+        colSelect.appendChild(opt1);
+
+        const opt2 = document.createElement('option');
+        opt2.value = c;
+        opt2.textContent = c;
+        dispSelect.appendChild(opt2);
+      });
+
+      if (relation && relation.refTable === refTable) {
+        colSelect.value = relation.refColumn;
+        dispSelect.value = relation.refDisplay;
+      } else {
+        colSelect.value = 'id';
+        const firstNonId = refCols.find(c => c !== 'id');
+        if (firstNonId) dispSelect.value = firstNonId;
+      }
+    }
+
+    relPanel.querySelector('.rel-ref-table').addEventListener('change', (e) => {
+      populateRefSelects(e.target.value);
+    });
+
+    if (relation) populateRefSelects(relation.refTable);
+
+    relPanel.querySelector('.btn-save-rel').addEventListener('click', async () => {
+      const refTable = relPanel.querySelector('.rel-ref-table').value;
+      errorEditColumns.textContent = '';
+
+      try {
+        if (!refTable) {
+          if (relation) {
+            const res = await fetch(`/api/${currentDb.id}/${currentTable.name}/columns/${col}/relation`, { method: 'DELETE' });
+            if (!res.ok) {
+              const data = await res.json().catch(() => ({}));
+              throw new Error(data.error || 'Échec de la suppression de la liaison');
+            }
+          }
+        } else {
+          const refColumn = relPanel.querySelector('.rel-ref-column').value;
+          const refDisplay = relPanel.querySelector('.rel-ref-display').value;
+          const res = await fetch(`/api/${currentDb.id}/${currentTable.name}/columns/${col}/relation`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ refTable, refColumn, refDisplay })
+          });
+          if (!res.ok) {
+            const data = await res.json().catch(() => ({}));
+            throw new Error(data.error || 'Échec de la liaison');
+          }
+        }
+        await loadTableData();
+        renderEditColumnsList();
+        renderContent();
+      } catch (err) {
+        errorEditColumns.textContent = err.message;
+      }
+    });
+
+    row.querySelector('.btn-link-col').addEventListener('click', () => {
+      relPanel.hidden = !relPanel.hidden;
+    });
 
     row.querySelector('.btn-save-col').addEventListener('click', async () => {
       const input = row.querySelector('.edit-col-name');
@@ -908,7 +1077,9 @@ function renderEditColumnsList() {
       }
     });
 
-    editColumnsList.appendChild(row);
+    block.appendChild(row);
+    block.appendChild(relPanel);
+    editColumnsList.appendChild(block);
   });
 }
 
