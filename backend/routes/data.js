@@ -9,6 +9,8 @@ const {
   createTable,
   dropTable,
   getTableData,
+  updateRow,
+  bulkInsertRows,
   getConnection,
 } = require('../db/db');
 
@@ -125,12 +127,38 @@ router.post('/:dbId/:tableName', (req, res) => {
 
     const cols = Object.keys(data);
     const placeholders = cols.map(() => '?').join(', ');
+    const colsQuoted = cols.map(c => `"${c}"`).join(', ');
     const stmt = db.prepare(
-      `INSERT INTO "${tableName}" (${cols.join(', ')}) VALUES (${placeholders})`
+      `INSERT INTO "${tableName}" (${colsQuoted}) VALUES (${placeholders})`
     );
     const info = stmt.run(...Object.values(data));
 
     res.status(201).json({ success: true, id: info.lastInsertRowid });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.patch('/:dbId/:tableName/:rowId', (req, res) => {
+  try {
+    const { dbId, tableName, rowId } = req.params;
+    updateRow(dbId, tableName, rowId, req.body);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/:dbId/:tableName/bulk  { rows: [{...}, {...}] } -> importe plusieurs lignes (ex: CSV)
+router.post('/:dbId/:tableName/bulk', (req, res) => {
+  try {
+    const { dbId, tableName } = req.params;
+    const { rows } = req.body;
+    if (!Array.isArray(rows) || rows.length === 0) {
+      return res.status(400).json({ error: 'Aucune ligne à importer.' });
+    }
+    const result = bulkInsertRows(dbId, tableName, rows);
+    res.status(201).json(result);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

@@ -1,8 +1,3 @@
-// ============================================================
-// Ce fichier appelle le vrai backend Node.js/Express en local
-// (voir backend/routes/data.js pour les routes disponibles)
-// ============================================================
-
 let databases = [];
 let currentDb = null;
 let currentTable = null;
@@ -38,15 +33,6 @@ async function loadTableData() {
   currentTableData = await res.json();
 }
 
-// ============================================================
-// GLISSER-DÉPOSER GÉNÉRIQUE : rend une liste réordonnable.
-// - container : élément parent (ul, div...) — on y attache les écouteurs
-//   UNE SEULE FOIS ; les items peuvent changer (rerender) sans problème
-//   grâce à la délégation d'événements (closest()).
-// - itemSelector : sélecteur CSS des éléments déplaçables
-// - direction : 'vertical' (sidebar, colonnes) ou 'horizontal' (onglets)
-// - onDrop : callback(itemsInNewOrder) appelé une fois le glisser terminé
-// ============================================================
 function enableDragReorder(container, itemSelector, direction, onDrop) {
   let draggedEl = null;
 
@@ -126,7 +112,6 @@ function renderSidebar() {
           throw new Error(data.error || 'Échec de la suppression');
         }
 
-        // si la base supprimée était sélectionnée, on désélectionne
         if (currentDb && currentDb.id === db.id) {
           currentDb = null;
           currentTable = null;
@@ -202,7 +187,6 @@ function renderTabs() {
     tabsEl.appendChild(tab);
   });
 
-  // onglet "+" toujours visible pour ajouter une table à la base courante
   const addTab = document.createElement('div');
   addTab.className = 'tab tab-add';
   addTab.textContent = '+ table';
@@ -212,9 +196,10 @@ function renderTabs() {
 
 function renderContent() {
   const content = document.getElementById('content');
+  const toolbar = document.getElementById('contentToolbar');
 
-  // Aucune base du tout
   if (!currentDb) {
+    toolbar.classList.remove('visible');
     content.innerHTML = `
       <div class="empty-state">
         <div class="icon">🗂️</div>
@@ -226,8 +211,8 @@ function renderContent() {
     return;
   }
 
-  // Base sans aucune table : proposer d'en créer une
   if (!currentTable) {
+    toolbar.classList.remove('visible');
     content.innerHTML = `
       <div class="empty-state">
         <div class="icon">∅</div>
@@ -238,6 +223,8 @@ function renderContent() {
       .addEventListener('click', openNewTableModal);
     return;
   }
+
+  toolbar.classList.add('visible');
 
   const { columns, rows } = currentTableData;
 
@@ -255,17 +242,56 @@ function renderContent() {
   html += '</tr></thead><tbody>';
 
   rows.forEach(row => {
-    html += '<tr>';
+    html += `<tr data-row-id="${row.id}">`;
     columns.forEach((col, i) => {
-      const cell = row[col];
-      const isNum = typeof cell === 'number';
-      const cls = isNum ? 'cell-num' : (i === 0 ? 'cell-dim' : '');
-      html += `<td class="${cls}">${cell}</td>`;
+      const cell = row[col] ?? '';
+      const isId = col === 'id';
+      const isNum = !isId && typeof row[col] === 'number';
+      const cls = isId ? 'col-id' : `editable ${isNum ? 'cell-num' : (i === 0 ? 'cell-dim' : '')}`;
+      const editableAttr = isId ? '' : 'contenteditable="true"';
+      html += `<td class="${cls}" data-column="${col}" ${editableAttr}>${cell}</td>`;
     });
     html += '</tr>';
   });
   html += '</tbody></table>';
   content.innerHTML = html;
+
+  content.querySelectorAll('td.editable').forEach(td => {
+    const original = td.textContent;
+
+    td.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        td.blur();
+      }
+    });
+
+    td.addEventListener('blur', async () => {
+      const newValue = td.textContent.trim();
+      if (newValue === original) return;
+
+      const tr = td.closest('tr');
+      const rowId = tr.dataset.rowId;
+      const column = td.dataset.column;
+
+      try {
+        const res = await fetch(`/api/${currentDb.id}/${currentTable.name}/${rowId}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ [column]: newValue })
+        });
+        if (!res.ok) {
+          const data = await res.json().catch(() => ({}));
+          throw new Error(data.error || 'Échec de la sauvegarde');
+        }
+        td.classList.add('saved');
+        setTimeout(() => td.classList.remove('saved'), 600);
+      } catch (err) {
+        alert(err.message);
+        td.textContent = original;
+      }
+    });
+  });
 }
 
 function renderAll() {
@@ -274,10 +300,6 @@ function renderAll() {
   renderTabs();
   renderContent();
 }
-
-// ============================================================
-// MODALE : créer une nouvelle base
-// ============================================================
 
 const modalNewDb = document.getElementById('modalNewDb');
 const formNewDb = document.getElementById('formNewDb');
@@ -319,7 +341,6 @@ formNewDb.addEventListener('submit', async (e) => {
     closeNewDbModal();
     await loadDatabases();
 
-    // sélectionne la base fraîchement créée
     currentDb = databases.find(d => d.id === data.id);
     currentTable = null;
     renderAll();
@@ -359,7 +380,7 @@ function openNewTableModal() {
   errorNewTable.textContent = '';
   formNewTable.reset();
   columnsList.innerHTML = '';
-  addColumnRow(); // au moins une colonne par défaut
+  addColumnRow(); 
   modalNewTable.classList.add('open');
   document.getElementById('inputTableName').focus();
 }
@@ -410,13 +431,150 @@ formNewTable.addEventListener('submit', async (e) => {
   }
 });
 
-// ============================================================
-// BRANCHEMENT DU GLISSER-DÉPOSER
-// Attaché une seule fois : les conteneurs (dbList, tabs, columnsList)
-// restent les mêmes éléments DOM même quand leur contenu est réaffiché.
-// ============================================================
+const modalNewRow = document.getElementById('modalNewRow');
+const formNewRow = document.getElementById('formNewRow');
+const errorNewRow = document.getElementById('errorNewRow');
+const rowFieldsList = document.getElementById('rowFieldsList');
 
-// 1. Réordonner les bases dans la sidebar
+function openNewRowModal() {
+  if (!currentTable) return;
+  errorNewRow.textContent = '';
+  rowFieldsList.innerHTML = '';
+
+  currentTableData.columns
+    .filter(col => col !== 'id')
+    .forEach(col => {
+      const label = document.createElement('label');
+      label.innerHTML = `${col}<input type="text" class="row-field" data-column="${col}">`;
+      rowFieldsList.appendChild(label);
+    });
+
+  modalNewRow.classList.add('open');
+  const firstInput = rowFieldsList.querySelector('input');
+  if (firstInput) firstInput.focus();
+}
+
+function closeNewRowModal() {
+  modalNewRow.classList.remove('open');
+}
+
+document.getElementById('btnAddRow').addEventListener('click', openNewRowModal);
+document.getElementById('cancelNewRow').addEventListener('click', closeNewRowModal);
+modalNewRow.addEventListener('click', (e) => {
+  if (e.target === modalNewRow) closeNewRowModal();
+});
+
+formNewRow.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  errorNewRow.textContent = '';
+
+  const data = {};
+  rowFieldsList.querySelectorAll('.row-field').forEach(input => {
+    data[input.dataset.column] = input.value;
+  });
+
+  try {
+    const res = await fetch(`/api/${currentDb.id}/${currentTable.name}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data)
+    });
+    const result = await res.json();
+    if (!res.ok) throw new Error(result.error || 'Erreur inconnue');
+
+    closeNewRowModal();
+    await loadDatabases();
+    await loadTableData();
+    renderAll();
+  } catch (err) {
+    errorNewRow.textContent = err.message;
+  }
+});
+
+function parseCsv(text) {
+  const lines = text.split(/\r?\n/).filter(l => l.trim() !== '');
+  if (lines.length === 0) return { headers: [], rows: [] };
+
+  const parseLine = (line) => {
+    const result = [];
+    let current = '';
+    let inQuotes = false;
+    for (let i = 0; i < line.length; i++) {
+      const char = line[i];
+      if (char === '"') {
+        inQuotes = !inQuotes;
+      } else if (char === ',' && !inQuotes) {
+        result.push(current.trim());
+        current = '';
+      } else {
+        current += char;
+      }
+    }
+    result.push(current.trim());
+    return result;
+  };
+
+  const headers = parseLine(lines[0]);
+  const rows = lines.slice(1).map(parseLine).map(values => {
+    const obj = {};
+    headers.forEach((h, i) => { obj[h] = values[i] ?? ''; });
+    return obj;
+  });
+
+  return { headers, rows };
+}
+
+document.getElementById('btnImportCsv').addEventListener('click', () => {
+  if (!currentTable) return;
+  document.getElementById('csvFileInput').click();
+});
+
+document.getElementById('csvFileInput').addEventListener('change', async (e) => {
+  const file = e.target.files[0];
+  if (!file || !currentDb || !currentTable) return;
+
+  try {
+    const text = await file.text();
+    const { headers, rows } = parseCsv(text);
+
+    // ne garde que les colonnes du CSV qui correspondent à des colonnes existantes de la table
+    const validColumns = currentTableData.columns.filter(c => c !== 'id');
+    const matchedHeaders = headers.filter(h => validColumns.includes(h));
+
+    if (matchedHeaders.length === 0) {
+      alert(
+        `Aucune colonne du CSV ne correspond à celles de la table.\n` +
+        `Colonnes attendues : ${validColumns.join(', ')}\n` +
+        `Colonnes trouvées : ${headers.join(', ')}`
+      );
+      return;
+    }
+
+    const cleanedRows = rows.map(row => {
+      const obj = {};
+      matchedHeaders.forEach(h => { obj[h] = row[h]; });
+      return obj;
+    });
+
+    const res = await fetch(`/api/${currentDb.id}/${currentTable.name}/bulk`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ rows: cleanedRows })
+    });
+    const result = await res.json();
+    if (!res.ok) throw new Error(result.error || 'Échec de l\'import');
+
+    alert(`${result.inserted} ligne(s) importée(s) avec succès.`);
+    await loadDatabases();
+    await loadTableData();
+    renderAll();
+  } catch (err) {
+    alert('Erreur lors de l\'import : ' + err.message);
+  } finally {
+    e.target.value = ''; 
+  }
+});
+
 enableDragReorder(document.getElementById('dbList'), '.db-item', 'vertical', (items) => {
   const orderedIds = items.map(el => el.dataset.dbId);
   databases.sort((a, b) => orderedIds.indexOf(a.id) - orderedIds.indexOf(b.id));
@@ -427,8 +585,6 @@ enableDragReorder(document.getElementById('dbList'), '.db-item', 'vertical', (it
     body: JSON.stringify({ orderedIds })
   }).catch(err => console.error('Échec sauvegarde ordre des bases :', err));
 });
-
-// 2. Réordonner les onglets de tables (on exclut l'onglet "+ table")
 enableDragReorder(document.getElementById('tabs'), '.tab:not(.tab-add)', 'horizontal', (items) => {
   if (!currentDb) return;
   const orderedNames = items.map(el => el.dataset.tableName);
@@ -441,8 +597,6 @@ enableDragReorder(document.getElementById('tabs'), '.tab:not(.tab-add)', 'horizo
   }).catch(err => console.error('Échec sauvegarde ordre des tables :', err));
 });
 
-// 3. Réordonner les colonnes dans le formulaire de création de table
-//    (purement visuel : l'ordre final est simplement lu dans le DOM à la soumission)
 enableDragReorder(document.getElementById('columnsList'), '.column-row', 'vertical', () => {});
 
 loadDatabases();

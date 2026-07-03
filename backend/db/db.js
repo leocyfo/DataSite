@@ -5,11 +5,6 @@ const path = require('path');
 const DB_DIR = __dirname;
 const REGISTRY_PATH = path.join(DB_DIR, 'registry.json');
 
-// ============================================================
-// Le registre garde la liste des bases créées (id, nom, icône,
-// fichier, ordre, ordre des tables). Stocké dans registry.json.
-// ============================================================
-
 function loadRegistry() {
   if (!fs.existsSync(REGISTRY_PATH)) return [];
   return JSON.parse(fs.readFileSync(REGISTRY_PATH, 'utf-8'));
@@ -119,7 +114,6 @@ function deleteDatabase(dbId) {
   saveRegistry(updated);
 }
 
-// réordonne les bases selon un tableau d'ids dans le nouvel ordre voulu
 function reorderDatabases(orderedIds) {
   const registry = loadRegistry();
   orderedIds.forEach((id, index) => {
@@ -129,7 +123,6 @@ function reorderDatabases(orderedIds) {
   saveRegistry(registry);
 }
 
-// réordonne les tables d'une base selon un tableau de noms dans le nouvel ordre
 function reorderTables(dbId, orderedNames) {
   const registry = loadRegistry();
   const entry = registry.find(d => d.id === dbId);
@@ -189,6 +182,38 @@ function getTableData(dbId, tableName) {
   return { columns, rows };
 }
 
+function updateRow(dbId, tableName, rowId, data) {
+  const db = getConnection(dbId);
+  const safeTable = tableName.replace(/[^a-zA-Z0-9_]/g, '_');
+
+  const cols = Object.keys(data).filter(c => c !== 'id');
+  if (cols.length === 0) return;
+
+  const setClause = cols.map(c => `"${c}" = ?`).join(', ');
+  const values = cols.map(c => data[c]);
+  db.prepare(`UPDATE "${safeTable}" SET ${setClause} WHERE id = ?`).run(...values, rowId);
+}
+
+function bulkInsertRows(dbId, tableName, rows) {
+  const db = getConnection(dbId);
+  const safeTable = tableName.replace(/[^a-zA-Z0-9_]/g, '_');
+  if (!rows || rows.length === 0) return { inserted: 0 };
+
+  const cols = Object.keys(rows[0]).filter(c => c !== 'id');
+  const placeholders = cols.map(() => '?').join(', ');
+  const colsQuoted = cols.map(c => `"${c}"`).join(', ');
+  const stmt = db.prepare(`INSERT INTO "${safeTable}" (${colsQuoted}) VALUES (${placeholders})`);
+
+  const insertMany = db.transaction((rowsToInsert) => {
+    for (const row of rowsToInsert) {
+      stmt.run(...cols.map(c => row[c] ?? null));
+    }
+  });
+  insertMany(rows);
+
+  return { inserted: rows.length };
+}
+
 module.exports = {
   getConnection,
   listDatabases,
@@ -199,4 +224,6 @@ module.exports = {
   createTable,
   dropTable,
   getTableData,
+  updateRow,
+  bulkInsertRows,
 };

@@ -47,6 +47,12 @@
 
     <div class="tabs" id="tabs"></div>
 
+    <div class="content-toolbar" id="contentToolbar">
+      <button class="btn-toolbar" id="btnAddRow">+ Ligne</button>
+      <button class="btn-toolbar" id="btnImportCsv">⇪ Importer CSV</button>
+      <input type="file" id="csvFileInput" accept=".csv" hidden>
+    </div>
+
     <div class="content" id="content"></div>
   </main>
 
@@ -91,6 +97,21 @@
       <div class="modal-actions">
         <button type="button" class="btn-secondary" id="cancelNewTable">Annuler</button>
         <button type="submit" class="btn-primary">Créer la table</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- MODALE : ajouter une ligne -->
+<div class="modal-overlay" id="modalNewRow">
+  <div class="modal">
+    <h2>Nouvelle ligne</h2>
+    <form id="formNewRow">
+      <div id="rowFieldsList"></div>
+      <p class="form-error" id="errorNewRow"></p>
+      <div class="modal-actions">
+        <button type="button" class="btn-secondary" id="cancelNewRow">Annuler</button>
+        <button type="submit" class="btn-primary">Ajouter</button>
       </div>
     </form>
   </div>
