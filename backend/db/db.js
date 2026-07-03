@@ -237,6 +237,48 @@ function renameTable(dbId, tableName, newTableName) {
   return { name: safeNewTable };
 }
 
+function addColumn(dbId, tableName, column) {
+  const db = getConnection(dbId);
+  const safeTable = safeIdentifier(tableName);
+  const safeName = safeIdentifier(column.name);
+  const type = VALID_TYPES.includes(column.type) ? column.type : 'TEXT';
+  db.exec(`ALTER TABLE "${safeTable}" ADD COLUMN "${safeName}" ${type}`);
+  return { name: safeName, type };
+}
+
+function renameColumn(dbId, tableName, columnName, newColumnName) {
+  const db = getConnection(dbId);
+  const safeTable = safeIdentifier(tableName);
+  const safeCol = safeIdentifier(columnName);
+  const safeNewCol = safeIdentifier(newColumnName);
+  db.exec(`ALTER TABLE "${safeTable}" RENAME COLUMN "${safeCol}" TO "${safeNewCol}"`);
+  return { name: safeNewCol };
+}
+
+function dropColumn(dbId, tableName, columnName) {
+  const db = getConnection(dbId);
+  const safeTable = safeIdentifier(tableName);
+  const safeCol = safeIdentifier(columnName);
+  db.exec(`ALTER TABLE "${safeTable}" DROP COLUMN "${safeCol}"`);
+}
+
+function runQuery(dbId, sql) {
+  const db = getConnection(dbId);
+  const trimmed = String(sql || '').trim();
+
+  if (!/^select\b/i.test(trimmed)) {
+    throw new Error('Seules les requêtes SELECT sont autorisées.');
+  }
+  if (/;\s*\S/.test(trimmed)) {
+    throw new Error('Une seule requête SELECT à la fois est autorisée.');
+  }
+
+  const stmt = db.prepare(trimmed);
+  const rows = stmt.all();
+  const columns = stmt.columns().map(c => c.name);
+  return { columns, rows };
+}
+
 function updateRow(dbId, tableName, rowId, data) {
   const db = getConnection(dbId);
   const safeTable = safeIdentifier(tableName);
@@ -286,5 +328,9 @@ module.exports = {
   deleteRow,
   renameDatabase,
   renameTable,
+  addColumn,
+  renameColumn,
+  dropColumn,
+  runQuery,
   bulkInsertRows,
 };
