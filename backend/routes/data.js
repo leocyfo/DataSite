@@ -19,6 +19,8 @@ const {
   dropColumn,
   runQuery,
   bulkInsertRows,
+  setRelation,
+  removeRelation,
 } = require('../db/db');
 
 // GET /api/databases  -> liste toutes les bases + leurs tables + nb de lignes
@@ -180,6 +182,33 @@ router.delete('/:dbId/:tableName/columns/:columnName', (req, res) => {
   try {
     const { dbId, tableName, columnName } = req.params;
     dropColumn(dbId, tableName, columnName);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/:dbId/:tableName/columns/:columnName/relation  { refTable, refColumn, refDisplay }
+// -> lie une colonne à une autre table (clé étrangère "logique")
+router.post('/:dbId/:tableName/columns/:columnName/relation', (req, res) => {
+  try {
+    const { dbId, tableName, columnName } = req.params;
+    const { refTable, refColumn, refDisplay } = req.body;
+    if (!refTable || !refColumn) {
+      return res.status(400).json({ error: 'La table et la colonne référencées sont requises.' });
+    }
+    const relation = setRelation(dbId, tableName, columnName, refTable, refColumn, refDisplay);
+    res.status(201).json(relation);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// DELETE /api/:dbId/:tableName/columns/:columnName/relation  -> supprime la liaison
+router.delete('/:dbId/:tableName/columns/:columnName/relation', (req, res) => {
+  try {
+    const { dbId, tableName, columnName } = req.params;
+    removeRelation(dbId, tableName, columnName);
     res.json({ success: true });
   } catch (err) {
     res.status(500).json({ error: err.message });

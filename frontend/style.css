@@ -825,9 +825,22 @@ tbody tr.row-selected{
   margin-bottom: 14px;
 }
 
+.edit-column-block{
+  display:flex;
+  flex-direction:column;
+  gap: 6px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+.edit-column-block:last-child{
+  border-bottom: none;
+  padding-bottom: 0;
+}
+
 .edit-column-row{
   display:grid;
-  grid-template-columns: 1fr 70px 28px 28px;
+  grid-template-columns: 1fr 70px 28px 28px 28px;
   gap: 6px;
   align-items:center;
 }
@@ -869,6 +882,82 @@ tbody tr.row-selected{
 
 .inline-add-column .btn-primary{
   white-space: nowrap;
+}
+
+/* ---------- RELATIONS ENTRE TABLES ---------- */
+.btn-link-col{
+  width: 28px;
+  height: 34px;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 12px;
+  line-height:1;
+}
+
+.btn-link-col:hover{
+  border-color: var(--accent-dim);
+  color: var(--accent);
+}
+
+.btn-link-col.linked{
+  border-color: var(--accent-dim);
+  color: var(--accent);
+  background: rgba(232, 163, 61, 0.08);
+}
+
+.rel-panel{
+  display:grid;
+  grid-template-columns: 1fr 1fr 1fr 28px;
+  gap: 6px;
+  align-items:center;
+  padding: 8px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.rel-panel select{
+  min-width:0;
+}
+
+.btn-save-rel{
+  width: 28px;
+  height: 34px;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--ok);
+  cursor: pointer;
+  font-size: 13px;
+  line-height:1;
+}
+
+.btn-save-rel:hover{
+  border-color: var(--ok);
+}
+
+td.rel-cell{
+  padding: 6px 10px;
+}
+
+.rel-select{
+  width: 100%;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 5px 6px;
+  color: var(--accent);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  outline: none;
+  cursor: pointer;
+}
+
+.rel-select:focus{
+  border-color: var(--accent-dim);
 }
 
 /* ---------- REQUÊTE SQL ---------- */
