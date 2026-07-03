@@ -14,6 +14,10 @@ function saveRegistry(registry) {
   fs.writeFileSync(REGISTRY_PATH, JSON.stringify(registry, null, 2));
 }
 
+function safeIdentifier(name) {
+  return String(name).replace(/[^a-zA-Z0-9_]/g, '_');
+}
+
 function slugify(name) {
   return name
     .toString()
@@ -135,10 +139,10 @@ const VALID_TYPES = ['TEXT', 'INTEGER', 'REAL'];
 
 function createTable(dbId, tableName, columns) {
   const db = getConnection(dbId);
-  const safeTable = tableName.replace(/[^a-zA-Z0-9_]/g, '_');
+  const safeTable = safeIdentifier(tableName);
 
   const colDefs = columns.map(col => {
-    const safeName = col.name.replace(/[^a-zA-Z0-9_]/g, '_');
+    const safeName = safeIdentifier(col.name);
     const type = VALID_TYPES.includes(col.type) ? col.type : 'TEXT';
     return `"${safeName}" ${type}`;
   }).join(', ');
@@ -164,7 +168,7 @@ function createTable(dbId, tableName, columns) {
 
 function dropTable(dbId, tableName) {
   const db = getConnection(dbId);
-  const safeTable = tableName.replace(/[^a-zA-Z0-9_]/g, '_');
+  const safeTable = safeIdentifier(tableName);
   db.exec(`DROP TABLE IF EXISTS "${safeTable}"`);
 
   const registry = loadRegistry();
@@ -177,31 +181,51 @@ function dropTable(dbId, tableName) {
 
 function getTableData(dbId, tableName) {
   const db = getConnection(dbId);
-  const columns = db.prepare(`PRAGMA table_info("${tableName}")`).all().map(c => c.name);
-  const rows = db.prepare(`SELECT * FROM "${tableName}"`).all();
+  const safeTable = safeIdentifier(tableName);
+  const columns = db.prepare(`PRAGMA table_info("${safeTable}")`).all().map(c => c.name);
+  const rows = db.prepare(`SELECT * FROM "${safeTable}"`).all();
   return { columns, rows };
+}
+
+function insertRow(dbId, tableName, data) {
+  const db = getConnection(dbId);
+  const safeTable = safeIdentifier(tableName);
+
+  const cols = Object.keys(data).filter(c => c !== 'id');
+  const safeCols = cols.map(safeIdentifier);
+  const placeholders = safeCols.map(() => '?').join(', ');
+  const colsQuoted = safeCols.map(c => `"${c}"`).join(', ');
+  const values = cols.map(c => data[c]);
+
+  const info = db.prepare(
+    `INSERT INTO "${safeTable}" (${colsQuoted}) VALUES (${placeholders})`
+  ).run(...values);
+
+  return { id: info.lastInsertRowid };
 }
 
 function updateRow(dbId, tableName, rowId, data) {
   const db = getConnection(dbId);
-  const safeTable = tableName.replace(/[^a-zA-Z0-9_]/g, '_');
+  const safeTable = safeIdentifier(tableName);
 
   const cols = Object.keys(data).filter(c => c !== 'id');
   if (cols.length === 0) return;
 
-  const setClause = cols.map(c => `"${c}" = ?`).join(', ');
+  const safeCols = cols.map(safeIdentifier);
+  const setClause = safeCols.map(c => `"${c}" = ?`).join(', ');
   const values = cols.map(c => data[c]);
   db.prepare(`UPDATE "${safeTable}" SET ${setClause} WHERE id = ?`).run(...values, rowId);
 }
 
 function bulkInsertRows(dbId, tableName, rows) {
   const db = getConnection(dbId);
-  const safeTable = tableName.replace(/[^a-zA-Z0-9_]/g, '_');
+  const safeTable = safeIdentifier(tableName);
   if (!rows || rows.length === 0) return { inserted: 0 };
 
   const cols = Object.keys(rows[0]).filter(c => c !== 'id');
-  const placeholders = cols.map(() => '?').join(', ');
-  const colsQuoted = cols.map(c => `"${c}"`).join(', ');
+  const safeCols = cols.map(safeIdentifier);
+  const placeholders = safeCols.map(() => '?').join(', ');
+  const colsQuoted = safeCols.map(c => `"${c}"`).join(', ');
   const stmt = db.prepare(`INSERT INTO "${safeTable}" (${colsQuoted}) VALUES (${placeholders})`);
 
   const insertMany = db.transaction((rowsToInsert) => {
@@ -224,6 +248,7 @@ module.exports = {
   createTable,
   dropTable,
   getTableData,
+  insertRow,
   updateRow,
   bulkInsertRows,
 };

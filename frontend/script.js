@@ -1,3 +1,12 @@
+function escapeHtml(value) {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
 let databases = [];
 let currentDb = null;
 let currentTable = null;
@@ -88,9 +97,9 @@ function renderSidebar() {
     li.dataset.dbId = db.id;
     li.innerHTML = `
       <div class="db-item-left">
-        <div class="db-icon">${db.icon}</div>
+        <div class="db-icon">${escapeHtml(db.icon)}</div>
         <div class="db-meta">
-          <div class="db-name">${db.name}</div>
+          <div class="db-name">${escapeHtml(db.name)}</div>
           <div class="db-sub">${db.tables.length} tables · ${totalRows} lignes</div>
         </div>
       </div>
@@ -156,7 +165,7 @@ function renderTabs() {
     tab.className = 'tab' + (currentTable && table.name === currentTable.name ? ' active' : '');
     tab.draggable = true;
     tab.dataset.tableName = table.name;
-    tab.innerHTML = `<span>${table.name}</span><button class="btn-delete-tab" title="Supprimer cette table">×</button>`;
+    tab.innerHTML = `<span>${escapeHtml(table.name)}</span><button class="btn-delete-tab" title="Supprimer cette table">×</button>`;
 
     tab.querySelector('span').addEventListener('click', async () => {
       currentTable = table;
@@ -238,18 +247,18 @@ function renderContent() {
   }
 
   let html = '<table><thead><tr>';
-  columns.forEach(col => { html += `<th>${col}</th>`; });
+  columns.forEach(col => { html += `<th>${escapeHtml(col)}</th>`; });
   html += '</tr></thead><tbody>';
 
   rows.forEach(row => {
-    html += `<tr data-row-id="${row.id}">`;
+    html += `<tr data-row-id="${escapeHtml(row.id)}">`;
     columns.forEach((col, i) => {
       const cell = row[col] ?? '';
       const isId = col === 'id';
       const isNum = !isId && typeof row[col] === 'number';
       const cls = isId ? 'col-id' : `editable ${isNum ? 'cell-num' : (i === 0 ? 'cell-dim' : '')}`;
       const editableAttr = isId ? '' : 'contenteditable="true"';
-      html += `<td class="${cls}" data-column="${col}" ${editableAttr}>${cell}</td>`;
+      html += `<td class="${cls}" data-column="${escapeHtml(col)}" ${editableAttr}>${escapeHtml(cell)}</td>`;
     });
     html += '</tr>';
   });
@@ -445,7 +454,7 @@ function openNewRowModal() {
     .filter(col => col !== 'id')
     .forEach(col => {
       const label = document.createElement('label');
-      label.innerHTML = `${col}<input type="text" class="row-field" data-column="${col}">`;
+      label.innerHTML = `${escapeHtml(col)}<input type="text" class="row-field" data-column="${escapeHtml(col)}">`;
       rowFieldsList.appendChild(label);
     });
 
