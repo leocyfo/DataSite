@@ -24,6 +24,8 @@ const {
   runQuery,
   bulkInsertRows,
   getRelations,
+  getRowReferences,
+  getTableReferencedBy,
   setRelation,
   removeRelation,
 } = require('../db/db');
@@ -191,6 +193,17 @@ router.get('/:dbId/relations', (req, res) => {
   }
 });
 
+// GET /api/:dbId/tables/:tableName/references -> colonnes d'autres tables qui référencent cette table
+// (utilisé pour avertir avant suppression)
+router.get('/:dbId/tables/:tableName/references', (req, res) => {
+  try {
+    const { dbId, tableName } = req.params;
+    res.json(getTableReferencedBy(dbId, tableName));
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // DELETE /api/:dbId/tables/:tableName  -> supprime une table
 router.delete('/:dbId/tables/:tableName', (req, res) => {
   try {
@@ -219,15 +232,16 @@ router.patch('/:dbId/tables/:tableName', (req, res) => {
   }
 });
 
-// POST /api/:dbId/:tableName/columns  { name, type } -> ajoute une colonne
+// POST /api/:dbId/:tableName/columns  { name, type, kind } -> ajoute une colonne
+// (kind : 'color' | 'image' | 'boolean' | 'date' | 'url', optionnel — pilote le rendu riche côté frontend)
 router.post('/:dbId/:tableName/columns', (req, res) => {
   try {
     const { dbId, tableName } = req.params;
-    const { name, type } = req.body;
+    const { name, type, kind } = req.body;
     if (!name || !name.trim()) {
       return res.status(400).json({ error: 'Le nom de la colonne est requis.' });
     }
-    const column = addColumn(dbId, tableName, { name: name.trim(), type });
+    const column = addColumn(dbId, tableName, { name: name.trim(), type, kind });
     res.status(201).json(column);
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -331,6 +345,17 @@ router.patch('/:dbId/:tableName/:rowId', (req, res) => {
     const { dbId, tableName, rowId } = req.params;
     updateRow(dbId, tableName, rowId, req.body);
     res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/:dbId/:tableName/:rowId/references -> lignes d'autres tables qui pointent vers cette ligne
+// (utilisé pour avertir avant suppression)
+router.get('/:dbId/:tableName/:rowId/references', (req, res) => {
+  try {
+    const { dbId, tableName, rowId } = req.params;
+    res.json(getRowReferences(dbId, tableName, rowId));
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

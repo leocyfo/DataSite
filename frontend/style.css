@@ -754,6 +754,7 @@ tbody tr:hover{
   color: var(--text-dim);
   line-height: 1.5;
   margin-bottom: 4px;
+  white-space: pre-line;
 }
 
 /* ---------- LISTE DE COLONNES (formulaire table) ---------- */
@@ -1129,6 +1130,134 @@ tbody td.col-id{
   color: var(--text-dim);
   cursor: default;
 }
+
+tbody td.editable.cell-url{
+  color: var(--accent);
+  text-decoration: underline dotted;
+  text-underline-offset: 2px;
+}
+
+/* ---------- TYPES DE COLONNE RICHES (couleur, image, booléen, date) ---------- */
+td.bool-cell,
+td.date-cell{
+  padding: 8px 14px;
+}
+
+.bool-checkbox{
+  width: 15px;
+  height: 15px;
+  cursor: pointer;
+  accent-color: var(--accent);
+}
+
+.date-input{
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 5px 7px;
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  outline: none;
+  color-scheme: dark;
+}
+
+.date-input:focus{
+  border-color: var(--accent-dim);
+}
+
+/* les cellules couleur/image restent des <td> normaux (display: table-cell) —
+   mettre display:flex directement dessus leur ferait perdre leur rôle de cellule
+   de tableau et casserait l'alignement des colonnes */
+td.color-cell{
+  text-align: center;
+  padding: 6px 14px;
+}
+
+.color-swatch{
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: none;
+  cursor: pointer;
+}
+
+.color-swatch::-webkit-color-swatch-wrapper{ padding: 2px; }
+.color-swatch::-webkit-color-swatch{ border: none; border-radius: 3px; }
+
+td.image-cell{
+  text-align: center;
+  padding: 6px 14px;
+}
+
+.image-thumb-wrap{
+  display: inline-block;
+  cursor: pointer;
+  border-radius: 7px;
+}
+
+.image-thumb{
+  display: block;
+  width: 60px;
+  height: 60px;
+  object-fit: cover;
+  border-radius: 7px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  transition: border-color 0.15s ease;
+}
+
+.image-thumb-wrap:hover .image-thumb{
+  border-color: var(--accent-dim);
+}
+
+.image-upload-btn{
+  flex-shrink: 0;
+  width: 26px;
+  height: 26px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  font-size: 12px;
+  cursor: pointer;
+  color: var(--text-dim);
+  transition: border-color 0.15s ease, color 0.15s ease;
+}
+
+.image-upload-btn:hover{
+  border-color: var(--accent-dim);
+  color: var(--accent);
+}
+
+/* ---------- CHAMPS COULEUR / IMAGE DANS LA MODALE "NOUVELLE LIGNE" ---------- */
+.row-field-pair{
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.row-field-pair .row-field{
+  flex: 1;
+  min-width: 0;
+}
+
+.row-field-color-swatch{
+  width: 34px;
+  height: 34px;
+  flex-shrink: 0;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: none;
+  cursor: pointer;
+}
+
+.row-field-color-swatch::-webkit-color-swatch-wrapper{ padding: 3px; }
+.row-field-color-swatch::-webkit-color-swatch{ border: none; border-radius: 4px; }
 
 /* ---------- GLISSER-DÉPOSER ---------- */
 .db-item{
@@ -1557,7 +1686,9 @@ td.rel-cell{
 }
 
 .graph-rel:hover .graph-rel-path{
-  stroke: var(--danger);
+  /* !important nécessaire : la couleur propre à chaque liaison est posée en style
+     inline (une par relation), qui l'emporterait sinon sur cette règle de survol */
+  stroke: var(--danger) !important;
 }
 
 .graph-rel-hit{
@@ -1575,8 +1706,8 @@ td.rel-cell{
 }
 
 .graph-rel:hover .graph-rel-dot{
-  fill: var(--danger);
-  stroke: var(--danger);
+  fill: var(--danger) !important;
+  stroke: var(--danger) !important;
 }
 
 .graph-temp-path{
@@ -1690,6 +1821,13 @@ td.rel-cell{
   border-color: var(--accent);
   transform: scale(1.4);
   box-shadow: 0 0 10px 2px rgba(232, 163, 61, 0.6);
+}
+
+/* un connecteur relié par une liaison se remplit de la couleur propre à cette liaison
+   (posée en JS via la variable --connector-color), au lieu de rester creux */
+.graph-connector.graph-connector-filled{
+  background: var(--connector-color, var(--accent));
+  border-color: var(--connector-color, var(--accent));
 }
 
 body.graph-node-dragging,

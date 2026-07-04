@@ -214,6 +214,33 @@ function getTableRelations(dbId, tableName) {
   });
 }
 
+// pour une ligne donnée, cherche dans les autres tables toutes celles qui la référencent
+// via une liaison logique (utilisé pour avertir avant suppression)
+function getRowReferences(dbId, tableName, rowId) {
+  const db = getConnection(dbId);
+  const safeTable = safeIdentifier(tableName);
+  const row = db.prepare(`SELECT * FROM "${safeTable}" WHERE id = ?`).get(rowId);
+  if (!row) return [];
+
+  return getRelations(dbId)
+    .filter(r => r.refTable === safeTable)
+    .map(rel => {
+      const value = row[rel.refColumn];
+      if (value === undefined || value === null || value === '') return null;
+      const count = db.prepare(`SELECT COUNT(*) as c FROM "${rel.table}" WHERE "${rel.column}" = ?`).get(value).c;
+      return count > 0 ? { table: rel.table, column: rel.column, count } : null;
+    })
+    .filter(Boolean);
+}
+
+// liste les colonnes d'autres tables qui référencent cette table (avant suppression de table)
+function getTableReferencedBy(dbId, tableName) {
+  const safeTable = safeIdentifier(tableName);
+  return getRelations(dbId)
+    .filter(r => r.refTable === safeTable)
+    .map(r => ({ table: r.table, column: r.column }));
+}
+
 function setRelation(dbId, table, column, refTable, refColumn, refDisplay) {
   const db = getConnection(dbId);
   const safeTable = safeIdentifier(table);
@@ -255,15 +282,54 @@ function removeRelation(dbId, table, column) {
 
 const VALID_TYPES = ['TEXT', 'INTEGER', 'REAL'];
 
+// les "kinds" sont des types d'affichage riches (couleur, image, case à cocher...)
+// qui n'existent pas nativement en SQLite : on les stocke dans un type SQL de base
+// et on garde le kind à part (registry.json) pour piloter le rendu côté frontend
+const KIND_STORAGE_TYPE = {
+  color: 'TEXT',
+  image: 'TEXT',
+  boolean: 'INTEGER',
+  date: 'TEXT',
+  url: 'TEXT',
+};
+
+function resolveColumnDef(col) {
+  const kind = Object.prototype.hasOwnProperty.call(KIND_STORAGE_TYPE, col.kind) ? col.kind : null;
+  const type = kind ? KIND_STORAGE_TYPE[kind] : (VALID_TYPES.includes(col.type) ? col.type : 'TEXT');
+  return { type, kind };
+}
+
+function getColumnKinds(dbId, tableName) {
+  const registry = loadRegistry();
+  const entry = registry.find(d => d.id === dbId);
+  const safeTable = safeIdentifier(tableName);
+  return (entry && entry.columnKinds && entry.columnKinds[safeTable]) || {};
+}
+
+function setColumnKind(dbId, tableName, columnName, kind) {
+  const registry = loadRegistry();
+  const entry = registry.find(d => d.id === dbId);
+  if (!entry) return;
+
+  const safeTable = safeIdentifier(tableName);
+  const safeCol = safeIdentifier(columnName);
+  entry.columnKinds = entry.columnKinds || {};
+  entry.columnKinds[safeTable] = entry.columnKinds[safeTable] || {};
+
+  if (kind) {
+    entry.columnKinds[safeTable][safeCol] = kind;
+  } else {
+    delete entry.columnKinds[safeTable][safeCol];
+  }
+  saveRegistry(registry);
+}
+
 function createTable(dbId, tableName, columns) {
   const db = getConnection(dbId);
   const safeTable = safeIdentifier(tableName);
 
-  const colDefs = columns.map(col => {
-    const safeName = safeIdentifier(col.name);
-    const type = VALID_TYPES.includes(col.type) ? col.type : 'TEXT';
-    return `"${safeName}" ${type}`;
-  }).join(', ');
+  const resolved = columns.map(col => ({ safeName: safeIdentifier(col.name), ...resolveColumnDef(col) }));
+  const colDefs = resolved.map(c => `"${c.safeName}" ${c.type}`).join(', ');
 
   db.exec(`
     CREATE TABLE IF NOT EXISTS "${safeTable}" (
@@ -280,6 +346,10 @@ function createTable(dbId, tableName, columns) {
     if (!entry.tableOrder.includes(safeTable)) entry.tableOrder.push(safeTable);
     saveRegistry(registry);
   }
+
+  resolved.forEach(c => {
+    if (c.kind) setColumnKind(dbId, safeTable, c.safeName, c.kind);
+  });
 
   return { name: safeTable, rowCount: 0 };
 }
@@ -300,6 +370,9 @@ function dropTable(dbId, tableName) {
     }
     if (entry.nodePositions) {
       delete entry.nodePositions[safeTable];
+    }
+    if (entry.columnKinds) {
+      delete entry.columnKinds[safeTable];
     }
     saveRegistry(registry);
   }
@@ -346,7 +419,9 @@ function getTableData(dbId, tableName) {
     ).all();
   });
 
-  return { columns, columnTypes, rows, relations, relationOptions };
+  const columnKinds = getColumnKinds(dbId, tableName);
+
+  return { columns, columnTypes, columnKinds, rows, relations, relationOptions };
 }
 
 function insertRow(dbId, tableName, data) {
@@ -404,6 +479,10 @@ function renameTable(dbId, tableName, newTableName) {
       entry.nodePositions[safeNewTable] = entry.nodePositions[safeTable];
       delete entry.nodePositions[safeTable];
     }
+    if (entry.columnKinds && entry.columnKinds[safeTable]) {
+      entry.columnKinds[safeNewTable] = entry.columnKinds[safeTable];
+      delete entry.columnKinds[safeTable];
+    }
     saveRegistry(registry);
   }
 
@@ -414,9 +493,10 @@ function addColumn(dbId, tableName, column) {
   const db = getConnection(dbId);
   const safeTable = safeIdentifier(tableName);
   const safeName = safeIdentifier(column.name);
-  const type = VALID_TYPES.includes(column.type) ? column.type : 'TEXT';
+  const { type, kind } = resolveColumnDef(column);
   db.exec(`ALTER TABLE "${safeTable}" ADD COLUMN "${safeName}" ${type}`);
-  return { name: safeName, type };
+  if (kind) setColumnKind(dbId, safeTable, safeName, kind);
+  return { name: safeName, type, kind };
 }
 
 function renameColumn(dbId, tableName, columnName, newColumnName) {
@@ -435,8 +515,12 @@ function renameColumn(dbId, tableName, columnName, newColumnName) {
       refColumn: (r.refTable === safeTable && r.refColumn === safeCol) ? safeNewCol : r.refColumn,
       refDisplay: (r.refTable === safeTable && r.refDisplay === safeCol) ? safeNewCol : r.refDisplay,
     }));
-    saveRegistry(registry);
   }
+  if (entry && entry.columnKinds && entry.columnKinds[safeTable] && entry.columnKinds[safeTable][safeCol]) {
+    entry.columnKinds[safeTable][safeNewCol] = entry.columnKinds[safeTable][safeCol];
+    delete entry.columnKinds[safeTable][safeCol];
+  }
+  if (entry) saveRegistry(registry);
 
   return { name: safeNewCol };
 }
@@ -454,8 +538,11 @@ function dropColumn(dbId, tableName, columnName) {
       !(r.table === safeTable && r.column === safeCol) &&
       !(r.refTable === safeTable && (r.refColumn === safeCol || r.refDisplay === safeCol))
     );
-    saveRegistry(registry);
   }
+  if (entry && entry.columnKinds && entry.columnKinds[safeTable]) {
+    delete entry.columnKinds[safeTable][safeCol];
+  }
+  if (entry) saveRegistry(registry);
 }
 
 function runQuery(dbId, sql) {
@@ -535,6 +622,8 @@ module.exports = {
   bulkInsertRows,
   getRelations,
   getTableRelations,
+  getRowReferences,
+  getTableReferencedBy,
   setRelation,
   removeRelation,
 };
