@@ -1,3 +1,4 @@
 ﻿node_modules/
 backend/db/*.db
 backend/db/registry.json
+backend/db/auth.json

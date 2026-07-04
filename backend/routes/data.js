@@ -3,6 +3,8 @@ const router = express.Router();
 const {
   listDatabases,
   createDatabase,
+  backupDatabase,
+  importDatabase,
   deleteDatabase,
   reorderDatabases,
   reorderTables,
@@ -40,6 +42,34 @@ router.post('/databases', (req, res) => {
       return res.status(400).json({ error: 'Le nom de la base est requis.' });
     }
     const entry = createDatabase(name.trim(), icon);
+    res.status(201).json(entry);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/databases/:dbId/backup  -> télécharge le fichier .db brut
+router.get('/databases/:dbId/backup', (req, res) => {
+  try {
+    const { filePath, filename } = backupDatabase(req.params.dbId);
+    res.download(filePath, filename);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/databases/import?name=...&icon=...  (corps: octets bruts du fichier .db)
+// -> importe un fichier .db existant comme nouvelle base
+router.post('/databases/import', express.raw({ type: '*/*', limit: '300mb' }), (req, res) => {
+  try {
+    const { name, icon } = req.query;
+    if (!name || !String(name).trim()) {
+      return res.status(400).json({ error: 'Le nom de la base est requis.' });
+    }
+    if (!req.body || !Buffer.isBuffer(req.body) || req.body.length === 0) {
+      return res.status(400).json({ error: 'Aucun fichier reçu.' });
+    }
+    const entry = importDatabase(String(name).trim(), icon, req.body);
     res.status(201).json(entry);
   } catch (err) {
     res.status(500).json({ error: err.message });

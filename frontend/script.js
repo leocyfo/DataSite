@@ -1,3 +1,14 @@
+// redirige vers la page de connexion si la session expire pendant l'usage de l'app
+const nativeFetch = window.fetch;
+window.fetch = async (...args) => {
+  const response = await nativeFetch(...args);
+  const url = String(args[0]);
+  if (response.status === 401 && !url.includes('/api/auth/')) {
+    window.location.href = '/login.html';
+  }
+  return response;
+};
+
 function escapeHtml(value) {
   return String(value ?? '')
     .replace(/&/g, '&amp;')
@@ -239,10 +250,18 @@ function renderSidebar() {
       </div>
       <div class="db-item-right">
         <div class="db-status"></div>
+        <button class="btn-export-db" title="Exporter cette base (.db)">⇩</button>
         <button class="btn-rename-db" title="Renommer cette base">✎</button>
         <button class="btn-delete-db" title="Supprimer cette base">🗑</button>
       </div>
     `;
+
+    li.querySelector('.btn-export-db').addEventListener('click', (e) => {
+      e.stopPropagation();
+      const a = document.createElement('a');
+      a.href = `/api/databases/${db.id}/backup`;
+      a.click();
+    });
 
     li.querySelector('.btn-rename-db').addEventListener('click', async (e) => {
       e.stopPropagation();
@@ -735,6 +754,72 @@ formNewDb.addEventListener('submit', async (e) => {
     renderAll();
   } catch (err) {
     errorNewDb.textContent = err.message;
+  }
+});
+
+const modalImportDb = document.getElementById('modalImportDb');
+const formImportDb = document.getElementById('formImportDb');
+const errorImportDb = document.getElementById('errorImportDb');
+
+function openImportDbModal() {
+  errorImportDb.textContent = '';
+  formImportDb.reset();
+  modalImportDb.classList.add('open');
+  document.getElementById('inputImportDbName').focus();
+}
+
+function closeImportDbModal() {
+  modalImportDb.classList.remove('open');
+}
+
+document.getElementById('btnImportDb').addEventListener('click', openImportDbModal);
+document.getElementById('cancelImportDb').addEventListener('click', closeImportDbModal);
+modalImportDb.addEventListener('click', (e) => {
+  if (e.target === modalImportDb) closeImportDbModal();
+});
+
+formImportDb.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  errorImportDb.textContent = '';
+
+  const name = document.getElementById('inputImportDbName').value.trim();
+  const icon = document.getElementById('inputImportDbIcon').value.trim();
+  const file = document.getElementById('inputImportDbFile').files[0];
+
+  if (!file) {
+    errorImportDb.textContent = 'Choisissez un fichier .db.';
+    return;
+  }
+
+  const submitBtn = document.getElementById('btnSubmitImportDb');
+  submitBtn.disabled = true;
+  submitBtn.textContent = 'Import en cours...';
+
+  try {
+    const fileBuffer = await file.arrayBuffer();
+    const params = new URLSearchParams({ name, icon });
+    const res = await fetch(`/api/databases/import?${params.toString()}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/octet-stream' },
+      body: fileBuffer
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Erreur inconnue');
+
+    closeImportDbModal();
+    await loadDatabases();
+
+    currentDb = databases.find(d => d.id === data.id);
+    currentTable = currentDb ? (currentDb.tables[0] || null) : null;
+    resetTableView();
+    await loadTableData();
+    renderAll();
+    showToast(`Base « ${data.name} » importée avec succès.`, 'success');
+  } catch (err) {
+    errorImportDb.textContent = err.message;
+  } finally {
+    submitBtn.disabled = false;
+    submitBtn.textContent = 'Importer';
   }
 });
 
@@ -1467,4 +1552,23 @@ document.getElementById('breadcrumb').addEventListener('click', async () => {
   }
 });
 
-loadDatabases();
+document.getElementById('btnLogout').addEventListener('click', async () => {
+  try {
+    await nativeFetch('/api/auth/logout', { method: 'POST' });
+  } catch (err) {
+    // ignore, on redirige quand même vers la page de connexion
+  }
+  window.location.href = '/login.html';
+});
+
+async function checkAuthThenInit() {
+  const res = await nativeFetch('/api/auth/status');
+  const status = await res.json();
+  if (!status.authenticated) {
+    window.location.href = '/login.html';
+    return;
+  }
+  loadDatabases();
+}
+
+checkAuthThenInit();
