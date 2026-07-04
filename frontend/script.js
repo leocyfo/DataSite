@@ -70,8 +70,10 @@ let selectedRowIds = new Set();
 let undoStack = [];
 let redoStack = [];
 const UNDO_LIMIT = 20;
+let viewMode = 'table'; // 'table' | 'graph'
 
 function resetTableView() {
+  viewMode = 'table';
   searchQuery = '';
   sortState = { column: null, dir: 'asc' };
   currentPage = 1;
@@ -327,6 +329,8 @@ function renderBreadcrumbPath(fullPath) {
 }
 
 function renderTopbar() {
+  updateViewSwitcher();
+
   if (!currentDb) {
     document.getElementById('dbTitle').textContent = 'Aucune base sélectionnée';
     renderBreadcrumbPath('—');
@@ -348,7 +352,7 @@ function renderTabs() {
 
   currentDb.tables.forEach(table => {
     const tab = document.createElement('div');
-    tab.className = 'tab' + (currentTable && table.name === currentTable.name ? ' active' : '');
+    tab.className = 'tab' + (viewMode === 'table' && currentTable && table.name === currentTable.name ? ' active' : '');
     tab.draggable = true;
     tab.dataset.tableName = table.name;
     tab.innerHTML = `<span>${escapeHtml(table.name)}</span><button class="btn-rename-tab" title="Renommer cette table">✎</button><button class="btn-delete-tab" title="Supprimer cette table">×</button>`;
@@ -420,6 +424,30 @@ function renderTabs() {
   tabsEl.appendChild(queryTab);
 }
 
+const btnViewTable = document.getElementById('btnViewTable');
+const btnViewGraph = document.getElementById('btnViewGraph');
+
+function updateViewSwitcher() {
+  const disabled = !currentDb;
+  btnViewTable.disabled = disabled;
+  btnViewGraph.disabled = disabled;
+  btnViewTable.classList.toggle('active', viewMode === 'table');
+  btnViewGraph.classList.toggle('active', viewMode === 'graph');
+}
+
+btnViewTable.addEventListener('click', async () => {
+  if (!currentDb || viewMode === 'table') return;
+  viewMode = 'table';
+  if (!currentTable) currentTable = currentDb.tables[0] || null;
+  await loadTableData();
+  renderAll();
+});
+
+btnViewGraph.addEventListener('click', () => {
+  if (!currentDb || viewMode === 'graph') return;
+  enterGraphMode();
+});
+
 function renderContent() {
   const content = document.getElementById('content');
   const toolbar = document.getElementById('contentToolbar');
@@ -436,6 +464,13 @@ function renderContent() {
       </div>`;
     document.getElementById('btnCreateFirstDb')
       .addEventListener('click', openNewDbModal);
+    return;
+  }
+
+  if (viewMode === 'graph') {
+    toolbar.classList.remove('visible');
+    pagination.innerHTML = '';
+    renderGraphView(content);
     return;
   }
 
@@ -709,6 +744,505 @@ function renderAll() {
   renderContent();
 }
 
+// =========================================================================
+// VUE SCHÉMA — tables sous forme de nœuds déplaçables, reliés entre eux
+// =========================================================================
+
+let graphCache = { dbId: null, relations: [], schemas: {} };
+let dragNodeState = null;
+let connectDragState = null;
+let graphZoom = 1;
+const GRAPH_ZOOM_MIN = 0.3;
+const GRAPH_ZOOM_MAX = 2.5;
+const GRAPH_ZOOM_STEP = 0.15;
+
+async function loadGraphData(dbId) {
+  const tables = currentDb.tables;
+  const [relations, schemaEntries] = await Promise.all([
+    fetch(`/api/${dbId}/relations`).then(r => r.ok ? r.json() : []),
+    Promise.all(tables.map(t =>
+      fetch(`/api/${dbId}/${t.name}`)
+        .then(r => r.ok ? r.json() : { columns: [], columnTypes: {} })
+        .then(data => [t.name, { columns: data.columns || [], columnTypes: data.columnTypes || {} }])
+    )),
+  ]);
+  graphCache = { dbId, relations, schemas: Object.fromEntries(schemaEntries) };
+}
+
+async function enterGraphMode() {
+  if (!currentDb) return;
+  viewMode = 'graph';
+  graphZoom = 1;
+  renderAll();
+  await loadGraphData(currentDb.id);
+  await ensureAutoLayout(false);
+  if (viewMode === 'graph') renderAll();
+}
+
+// place les tables sans position connue à gauche pour les tables référencées
+// (lookups) et à droite pour celles qui les référencent, comme un diagramme ER
+function computeAutoLayout(tables, relations) {
+  const names = tables.map(t => t.name);
+  const level = Object.fromEntries(names.map(n => [n, 0]));
+  const dependsOn = Object.fromEntries(names.map(n => [n, []]));
+
+  (relations || []).forEach(rel => {
+    if (dependsOn[rel.table] && names.includes(rel.refTable) && rel.refTable !== rel.table) {
+      dependsOn[rel.table].push(rel.refTable);
+    }
+  });
+
+  for (let pass = 0; pass < names.length + 1; pass++) {
+    let changed = false;
+    names.forEach(n => {
+      dependsOn[n].forEach(ref => {
+        if (level[ref] >= level[n]) {
+          level[n] = level[ref] + 1;
+          changed = true;
+        }
+      });
+    });
+    if (!changed) break;
+  }
+
+  const columns = {};
+  names.slice().sort().forEach(n => {
+    (columns[level[n]] = columns[level[n]] || []).push(n);
+  });
+
+  const COL_WIDTH = 300;
+  const ROW_HEIGHT = 220;
+  const positions = {};
+  Object.keys(columns).map(Number).sort((a, b) => a - b).forEach(col => {
+    columns[col].forEach((name, row) => {
+      positions[name] = { x: 40 + col * COL_WIDTH, y: 40 + row * ROW_HEIGHT };
+    });
+  });
+
+  return positions;
+}
+
+// calcule et sauvegarde des positions pour les tables qui n'en ont pas encore
+// (force=true recalcule et écrase la disposition de toutes les tables)
+async function ensureAutoLayout(force) {
+  if (!currentDb) return;
+  const tables = currentDb.tables;
+  const existing = currentDb.nodePositions || {};
+  const targets = force ? tables : tables.filter(t => !existing[t.name]);
+  if (targets.length === 0) return;
+
+  const layout = computeAutoLayout(tables, graphCache.relations);
+  const toSave = {};
+  targets.forEach(t => { toSave[t.name] = layout[t.name]; });
+
+  currentDb.nodePositions = { ...existing, ...toSave };
+
+  try {
+    await fetch(`/api/${currentDb.id}/tables/positions`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ positions: toSave }),
+    });
+  } catch (err) {
+    console.error('Échec sauvegarde de la disposition automatique :', err);
+  }
+}
+
+// convertit une position écran (post-zoom) en coordonnées "naturelles" (avant le zoom),
+// puisque le svg et les nœuds vivent tous les deux dans le même calque mis à l'échelle
+function getConnectorPoint(connectorEl, canvas) {
+  const cRect = canvas.getBoundingClientRect();
+  const pRect = connectorEl.getBoundingClientRect();
+  return {
+    x: (pRect.left - cRect.left + canvas.scrollLeft + pRect.width / 2) / graphZoom,
+    y: (pRect.top - cRect.top + canvas.scrollTop + pRect.height / 2) / graphZoom,
+  };
+}
+
+function bezierPath(p1, p2) {
+  const dx = Math.max(60, Math.abs(p2.x - p1.x) / 2);
+  return `M ${p1.x} ${p1.y} C ${p1.x + dx} ${p1.y}, ${p2.x - dx} ${p2.y}, ${p2.x} ${p2.y}`;
+}
+
+// recalcule la taille (en unités naturelles) du calque zoomable en fonction de
+// l'étendue réelle des nœuds, puis l'applique au calque et au svg
+function resizeGraphSurface(canvas) {
+  const zoomLayer = document.getElementById('graphZoomLayer');
+  const nodesLayer = document.getElementById('graphNodes');
+  const svg = document.getElementById('graphSvg');
+  if (!zoomLayer || !nodesLayer || !svg) return;
+
+  let maxX = 400, maxY = 300;
+  nodesLayer.querySelectorAll('.graph-node').forEach(node => {
+    const x = parseFloat(node.style.left) || 0;
+    const y = parseFloat(node.style.top) || 0;
+    maxX = Math.max(maxX, x + node.offsetWidth + 80);
+    maxY = Math.max(maxY, y + node.offsetHeight + 80);
+  });
+
+  zoomLayer.style.width = maxX + 'px';
+  zoomLayer.style.height = maxY + 'px';
+  svg.setAttribute('width', maxX);
+  svg.setAttribute('height', maxY);
+}
+
+function applyGraphZoom() {
+  const zoomLayer = document.getElementById('graphZoomLayer');
+  const label = document.getElementById('graphZoomLabel');
+  if (zoomLayer) zoomLayer.style.transform = `scale(${graphZoom})`;
+  if (label) label.textContent = Math.round(graphZoom * 100) + '%';
+}
+
+// ajuste le zoom en gardant le point sous le curseur (ou le centre du canevas) fixe à l'écran
+function setGraphZoom(newZoom, pivot) {
+  const clamped = Math.min(GRAPH_ZOOM_MAX, Math.max(GRAPH_ZOOM_MIN, newZoom));
+  const canvas = document.getElementById('graphCanvas');
+  if (!canvas || clamped === graphZoom) { graphZoom = clamped; applyGraphZoom(); return; }
+
+  const cRect = canvas.getBoundingClientRect();
+  const px = pivot ? pivot.x - cRect.left : canvas.clientWidth / 2;
+  const py = pivot ? pivot.y - cRect.top : canvas.clientHeight / 2;
+
+  const naturalX = (px + canvas.scrollLeft) / graphZoom;
+  const naturalY = (py + canvas.scrollTop) / graphZoom;
+
+  graphZoom = clamped;
+  applyGraphZoom();
+
+  canvas.scrollLeft = naturalX * graphZoom - px;
+  canvas.scrollTop = naturalY * graphZoom - py;
+
+  drawGraphRelations(canvas, document.getElementById('graphSvg'));
+}
+
+function drawGraphRelations(canvas, svg) {
+  resizeGraphSurface(canvas);
+  svg.innerHTML = '';
+
+  (graphCache.relations || []).forEach(rel => {
+    const fromEl = canvas.querySelector(`.graph-connector-out[data-table="${rel.table}"][data-column="${rel.column}"]`);
+    const toEl = canvas.querySelector(`.graph-connector-in[data-table="${rel.refTable}"][data-column="${rel.refColumn}"]`);
+    if (!fromEl || !toEl) return;
+
+    const p1 = getConnectorPoint(fromEl, canvas);
+    const p2 = getConnectorPoint(toEl, canvas);
+    const d = bezierPath(p1, p2);
+
+    const g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+    g.setAttribute('class', 'graph-rel');
+
+    const title = document.createElementNS('http://www.w3.org/2000/svg', 'title');
+    title.textContent = `${rel.table}.${rel.column} → ${rel.refTable}.${rel.refColumn} (cliquer pour supprimer)`;
+    g.appendChild(title);
+
+    const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    path.setAttribute('d', d);
+    path.setAttribute('class', 'graph-rel-path');
+    g.appendChild(path);
+
+    const hit = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    hit.setAttribute('d', d);
+    hit.setAttribute('class', 'graph-rel-hit');
+    g.appendChild(hit);
+
+    const dot = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+    dot.setAttribute('cx', (p1.x + p2.x) / 2);
+    dot.setAttribute('cy', (p1.y + p2.y) / 2);
+    dot.setAttribute('r', 7);
+    dot.setAttribute('class', 'graph-rel-dot');
+    g.appendChild(dot);
+
+    g.addEventListener('click', async () => {
+      const confirmed = await showConfirm(
+        `Supprimer la liaison « ${rel.table}.${rel.column} → ${rel.refTable}.${rel.refColumn} » ?`,
+        'Supprimer la liaison'
+      );
+      if (!confirmed) return;
+      try {
+        const res = await fetch(`/api/${currentDb.id}/${rel.table}/columns/${rel.column}/relation`, { method: 'DELETE' });
+        if (!res.ok) {
+          const data = await res.json().catch(() => ({}));
+          throw new Error(data.error || 'Échec de la suppression');
+        }
+        await loadGraphData(currentDb.id);
+        renderAll();
+        showToast('Liaison supprimée.', 'success');
+      } catch (err) {
+        showToast(err.message, 'error');
+      }
+    });
+
+    svg.appendChild(g);
+  });
+}
+
+function drawTempConnectLine(canvas, svg) {
+  if (!connectDragState) return;
+  let tempPath = svg.querySelector('.graph-temp-path');
+  if (!tempPath) {
+    tempPath = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    tempPath.setAttribute('class', 'graph-temp-path');
+    svg.appendChild(tempPath);
+  }
+  const fromEl = canvas.querySelector(`.graph-connector-out[data-table="${connectDragState.fromTable}"][data-column="${connectDragState.fromColumn}"]`);
+  if (!fromEl) return;
+
+  const p1 = getConnectorPoint(fromEl, canvas);
+  const cRect = canvas.getBoundingClientRect();
+  const p2 = {
+    x: (connectDragState.mouseX - cRect.left + canvas.scrollLeft) / graphZoom,
+    y: (connectDragState.mouseY - cRect.top + canvas.scrollTop) / graphZoom,
+  };
+  tempPath.setAttribute('d', bezierPath(p1, p2));
+}
+
+function startNodeDrag(header, e) {
+  e.preventDefault();
+  const node = header.closest('.graph-node');
+  dragNodeState = {
+    node,
+    tableName: node.dataset.table,
+    startX: e.clientX,
+    startY: e.clientY,
+    origLeft: parseFloat(node.style.left) || 0,
+    origTop: parseFloat(node.style.top) || 0,
+  };
+  node.classList.add('dragging');
+  document.body.classList.add('graph-node-dragging');
+}
+
+function handleNodeDragMove(e) {
+  const state = dragNodeState;
+  const canvas = document.getElementById('graphCanvas');
+  const svg = document.getElementById('graphSvg');
+  if (!state || !canvas || !svg) return;
+
+  const dx = (e.clientX - state.startX) / graphZoom;
+  const dy = (e.clientY - state.startY) / graphZoom;
+  state.node.style.left = Math.max(0, state.origLeft + dx) + 'px';
+  state.node.style.top = Math.max(0, state.origTop + dy) + 'px';
+  drawGraphRelations(canvas, svg);
+}
+
+function handleNodeDragEnd() {
+  const state = dragNodeState;
+  dragNodeState = null;
+  document.body.classList.remove('graph-node-dragging');
+  if (!state) return;
+
+  state.node.classList.remove('dragging');
+  const x = parseFloat(state.node.style.left) || 0;
+  const y = parseFloat(state.node.style.top) || 0;
+
+  currentDb.nodePositions = currentDb.nodePositions || {};
+  currentDb.nodePositions[state.tableName] = { x, y };
+
+  fetch(`/api/${currentDb.id}/tables/${state.tableName}/position`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ x, y }),
+  }).catch(err => console.error('Échec sauvegarde position :', err));
+}
+
+function startConnectDrag(connectorEl, e) {
+  e.preventDefault();
+  e.stopPropagation();
+  connectDragState = {
+    fromTable: connectorEl.dataset.table,
+    fromColumn: connectorEl.dataset.column,
+    mouseX: e.clientX,
+    mouseY: e.clientY,
+  };
+  document.body.classList.add('graph-connecting');
+}
+
+function handleConnectDragMove(e) {
+  if (!connectDragState) return;
+  connectDragState.mouseX = e.clientX;
+  connectDragState.mouseY = e.clientY;
+
+  const canvas = document.getElementById('graphCanvas');
+  const svg = document.getElementById('graphSvg');
+  if (!canvas || !svg) return;
+  drawTempConnectLine(canvas, svg);
+
+  document.querySelectorAll('.graph-connector-in.graph-connector-hover')
+    .forEach(el => el.classList.remove('graph-connector-hover'));
+  const target = document.elementFromPoint(e.clientX, e.clientY);
+  const connectorIn = target && target.closest('.graph-connector-in');
+  if (connectorIn && connectorIn.dataset.table !== connectDragState.fromTable) {
+    connectorIn.classList.add('graph-connector-hover');
+  }
+}
+
+async function handleConnectDragEnd(e) {
+  const state = connectDragState;
+  connectDragState = null;
+  document.body.classList.remove('graph-connecting');
+  document.querySelectorAll('.graph-connector-in.graph-connector-hover')
+    .forEach(el => el.classList.remove('graph-connector-hover'));
+  const svg = document.getElementById('graphSvg');
+  if (svg) {
+    const temp = svg.querySelector('.graph-temp-path');
+    if (temp) temp.remove();
+  }
+  if (!state) return;
+
+  const target = document.elementFromPoint(e.clientX, e.clientY);
+  const connectorIn = target && target.closest('.graph-connector-in');
+  if (!connectorIn) return;
+
+  const refTable = connectorIn.dataset.table;
+  const refColumn = connectorIn.dataset.column;
+  if (refTable === state.fromTable) return;
+
+  try {
+    const refSchema = graphCache.schemas[refTable] || { columns: [] };
+    const refDisplay = refColumn !== 'id' ? refColumn : (refSchema.columns.find(c => c !== 'id') || refColumn);
+
+    const res = await fetch(`/api/${currentDb.id}/${state.fromTable}/columns/${state.fromColumn}/relation`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ refTable, refColumn, refDisplay }),
+    });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.error || 'Échec de la liaison');
+    }
+    await loadGraphData(currentDb.id);
+    renderAll();
+    showToast(`Liaison créée : ${state.fromTable}.${state.fromColumn} → ${refTable}.${refColumn}`, 'success');
+  } catch (err) {
+    showToast(err.message, 'error');
+  }
+}
+
+document.addEventListener('mousemove', (e) => {
+  if (dragNodeState) handleNodeDragMove(e);
+  if (connectDragState) handleConnectDragMove(e);
+});
+document.addEventListener('mouseup', (e) => {
+  if (dragNodeState) handleNodeDragEnd(e);
+  if (connectDragState) handleConnectDragEnd(e);
+});
+window.addEventListener('resize', () => {
+  if (viewMode !== 'graph') return;
+  const canvas = document.getElementById('graphCanvas');
+  const svg = document.getElementById('graphSvg');
+  if (canvas && svg) drawGraphRelations(canvas, svg);
+});
+
+function renderGraphView(content) {
+  if (!currentDb) return;
+  const tables = currentDb.tables;
+
+  if (tables.length === 0) {
+    content.innerHTML = `
+      <div class="empty-state">
+        <div class="icon">🕸️</div>
+        <div>Cette base n'a pas encore de table</div>
+        <button class="btn-primary-empty" id="btnCreateFirstTableGraph">+ Créer une table</button>
+      </div>`;
+    document.getElementById('btnCreateFirstTableGraph').addEventListener('click', openNewTableModal);
+    return;
+  }
+
+  if (graphCache.dbId !== currentDb.id) {
+    content.innerHTML = `
+      <div class="empty-state">
+        <div class="icon">🕸️</div>
+        <div>Chargement du schéma...</div>
+      </div>`;
+    return;
+  }
+
+  content.innerHTML = `
+    <div class="graph-toolbar">
+      <span class="graph-hint">Glissez l'en-tête d'une table pour la déplacer · tirez depuis ⚪ vers une colonne d'une autre table pour créer une liaison</span>
+      <div class="graph-toolbar-actions">
+        <div class="graph-zoom-controls">
+          <button class="btn-toolbar" id="btnGraphZoomOut" title="Zoom arrière">−</button>
+          <span class="graph-zoom-label" id="graphZoomLabel">100%</span>
+          <button class="btn-toolbar" id="btnGraphZoomIn" title="Zoom avant">+</button>
+          <button class="btn-toolbar" id="btnGraphZoomReset" title="Réinitialiser le zoom (100%)">⤢</button>
+        </div>
+        <button class="btn-toolbar" id="btnGraphAutoLayout" title="Recalcule automatiquement la disposition de toutes les tables">🪄 Réorganiser</button>
+        <button class="btn-toolbar" id="btnGraphAddTable">+ Table</button>
+      </div>
+    </div>
+    <div class="graph-canvas" id="graphCanvas">
+      <div class="graph-zoom-layer" id="graphZoomLayer">
+        <svg class="graph-svg" id="graphSvg"></svg>
+        <div class="graph-nodes" id="graphNodes"></div>
+      </div>
+    </div>
+  `;
+
+  const canvas = document.getElementById('graphCanvas');
+  const nodesLayer = document.getElementById('graphNodes');
+  const svg = document.getElementById('graphSvg');
+  const nodePositions = currentDb.nodePositions || {};
+
+  tables.forEach((table, i) => {
+    const pos = nodePositions[table.name] || { x: 40 + (i % 4) * 280, y: 40 + Math.floor(i / 4) * 260 };
+
+    const schema = graphCache.schemas[table.name] || { columns: [], columnTypes: {} };
+    const node = document.createElement('div');
+    node.className = 'graph-node';
+    node.dataset.table = table.name;
+    node.style.left = pos.x + 'px';
+    node.style.top = pos.y + 'px';
+
+    const colsHtml = schema.columns.map(col => {
+      const type = (schema.columnTypes && schema.columnTypes[col]) || '';
+      const isId = col === 'id';
+      return `
+        <div class="graph-col-row">
+          <span class="graph-connector graph-connector-in" data-table="${escapeHtml(table.name)}" data-column="${escapeHtml(col)}" title="Cible de liaison : ${escapeHtml(col)}"></span>
+          <span class="graph-col-name">${escapeHtml(col)}</span>
+          <span class="graph-col-type">${escapeHtml(type)}</span>
+          ${isId ? '<span class="graph-connector-placeholder"></span>' : `<span class="graph-connector graph-connector-out" data-table="${escapeHtml(table.name)}" data-column="${escapeHtml(col)}" title="Tirer pour relier « ${escapeHtml(col)} »"></span>`}
+        </div>`;
+    }).join('');
+
+    node.innerHTML = `
+      <div class="graph-node-header">
+        <span class="graph-node-icon">🗂️</span>
+        <span class="graph-node-name">${escapeHtml(table.name)}</span>
+      </div>
+      <div class="graph-node-body">${colsHtml}</div>
+    `;
+    nodesLayer.appendChild(node);
+  });
+
+  nodesLayer.addEventListener('mousedown', (e) => {
+    const connector = e.target.closest('.graph-connector-out');
+    if (connector) { startConnectDrag(connector, e); return; }
+    const header = e.target.closest('.graph-node-header');
+    if (header) startNodeDrag(header, e);
+  });
+
+  canvas.addEventListener('wheel', (e) => {
+    if (!(e.ctrlKey || e.metaKey)) return; // molette seule = défilement normal
+    e.preventDefault();
+    const factor = e.deltaY < 0 ? (1 + GRAPH_ZOOM_STEP) : 1 / (1 + GRAPH_ZOOM_STEP);
+    setGraphZoom(graphZoom * factor, { x: e.clientX, y: e.clientY });
+  }, { passive: false });
+
+  applyGraphZoom();
+  drawGraphRelations(canvas, svg);
+
+  document.getElementById('btnGraphAddTable').addEventListener('click', openNewTableModal);
+  document.getElementById('btnGraphAutoLayout').addEventListener('click', async () => {
+    await ensureAutoLayout(true);
+    renderAll();
+    showToast('Schéma réorganisé automatiquement.', 'success');
+  });
+  document.getElementById('btnGraphZoomOut').addEventListener('click', () => setGraphZoom(graphZoom / (1 + GRAPH_ZOOM_STEP)));
+  document.getElementById('btnGraphZoomIn').addEventListener('click', () => setGraphZoom(graphZoom * (1 + GRAPH_ZOOM_STEP)));
+  document.getElementById('btnGraphZoomReset').addEventListener('click', () => setGraphZoom(1));
+}
+
 const modalNewDb = document.getElementById('modalNewDb');
 const formNewDb = document.getElementById('formNewDb');
 const errorNewDb = document.getElementById('errorNewDb');
@@ -751,6 +1285,7 @@ formNewDb.addEventListener('submit', async (e) => {
 
     currentDb = databases.find(d => d.id === data.id);
     currentTable = null;
+    viewMode = 'table';
     renderAll();
   } catch (err) {
     errorNewDb.textContent = err.message;
@@ -897,8 +1432,12 @@ formNewTable.addEventListener('submit', async (e) => {
     closeNewTableModal();
     await loadDatabases();
 
-    currentTable = currentDb.tables.find(t => t.name === data.name) || currentDb.tables[0];
-    await loadTableData();
+    if (viewMode === 'graph') {
+      await loadGraphData(currentDb.id);
+    } else {
+      currentTable = currentDb.tables.find(t => t.name === data.name) || currentDb.tables[0];
+      await loadTableData();
+    }
     renderAll();
   } catch (err) {
     errorNewTable.textContent = err.message;

@@ -8,6 +8,8 @@ const {
   deleteDatabase,
   reorderDatabases,
   reorderTables,
+  setNodePosition,
+  setNodePositions,
   createTable,
   dropTable,
   getTableData,
@@ -21,6 +23,7 @@ const {
   dropColumn,
   runQuery,
   bulkInsertRows,
+  getRelations,
   setRelation,
   removeRelation,
 } = require('../db/db');
@@ -144,6 +147,45 @@ router.post('/:dbId/tables', (req, res) => {
 
     const table = createTable(dbId, tableName.trim(), columns);
     res.status(201).json(table);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// PUT /api/:dbId/tables/:tableName/position  { x, y } -> sauvegarde la position du nœud dans la vue schéma
+router.put('/:dbId/tables/:tableName/position', (req, res) => {
+  try {
+    const { dbId, tableName } = req.params;
+    const { x, y } = req.body;
+    setNodePosition(dbId, tableName, x, y);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// PUT /api/:dbId/tables/positions  { positions: { tableName: {x,y}, ... } }
+// -> sauvegarde plusieurs positions de nœuds en une fois (utilisé par l'agencement automatique)
+router.put('/:dbId/tables/positions', (req, res) => {
+  try {
+    const { dbId } = req.params;
+    const { positions } = req.body;
+    if (!positions || typeof positions !== 'object') {
+      return res.status(400).json({ error: 'positions doit être un objet.' });
+    }
+    setNodePositions(dbId, positions);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/:dbId/relations  -> toutes les liaisons entre tables de cette base
+// (doit rester déclarée avant la route générique GET /:dbId/:tableName
+// pour ne pas être masquée par elle)
+router.get('/:dbId/relations', (req, res) => {
+  try {
+    res.json(getRelations(req.params.dbId));
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

@@ -66,7 +66,8 @@ function listDatabases() {
       rowCount: db.prepare(`SELECT COUNT(*) as c FROM "${tableName}"`).get().c
     }));
 
-    return { id, name, icon, tables: tableInfo };
+    const full = registry.find(d => d.id === id);
+    return { id, name, icon, tables: tableInfo, nodePositions: (full && full.nodePositions) || {} };
   });
 }
 
@@ -297,8 +298,36 @@ function dropTable(dbId, tableName) {
     if (entry.relations) {
       entry.relations = entry.relations.filter(r => r.table !== safeTable && r.refTable !== safeTable);
     }
+    if (entry.nodePositions) {
+      delete entry.nodePositions[safeTable];
+    }
     saveRegistry(registry);
   }
+}
+
+function setNodePosition(dbId, tableName, x, y) {
+  const registry = loadRegistry();
+  const entry = registry.find(d => d.id === dbId);
+  if (!entry) throw new Error(`Base de données inconnue: ${dbId}`);
+
+  const safeTable = safeIdentifier(tableName);
+  entry.nodePositions = entry.nodePositions || {};
+  entry.nodePositions[safeTable] = { x: Number(x) || 0, y: Number(y) || 0 };
+  saveRegistry(registry);
+}
+
+function setNodePositions(dbId, positions) {
+  const registry = loadRegistry();
+  const entry = registry.find(d => d.id === dbId);
+  if (!entry) throw new Error(`Base de données inconnue: ${dbId}`);
+
+  entry.nodePositions = entry.nodePositions || {};
+  Object.entries(positions || {}).forEach(([tableName, pos]) => {
+    if (!pos) return;
+    const safeTable = safeIdentifier(tableName);
+    entry.nodePositions[safeTable] = { x: Number(pos.x) || 0, y: Number(pos.y) || 0 };
+  });
+  saveRegistry(registry);
 }
 
 function getTableData(dbId, tableName) {
@@ -370,6 +399,10 @@ function renameTable(dbId, tableName, newTableName) {
         table: r.table === safeTable ? safeNewTable : r.table,
         refTable: r.refTable === safeTable ? safeNewTable : r.refTable,
       }));
+    }
+    if (entry.nodePositions && entry.nodePositions[safeTable]) {
+      entry.nodePositions[safeNewTable] = entry.nodePositions[safeTable];
+      delete entry.nodePositions[safeTable];
     }
     saveRegistry(registry);
   }
@@ -485,6 +518,8 @@ module.exports = {
   deleteDatabase,
   reorderDatabases,
   reorderTables,
+  setNodePosition,
+  setNodePositions,
   createTable,
   dropTable,
   getTableData,
