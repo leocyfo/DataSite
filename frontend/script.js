@@ -18,6 +18,43 @@ function escapeHtml(value) {
     .replace(/'/g, '&#39;');
 }
 
+// types de colonne proposés à la création : les 3 premiers sont des types SQL natifs,
+// les suivants sont des "kinds" d'affichage riches stockés sur un type SQL de base
+// (voir resolveColumnChoice) et pilotent le rendu des cellules dans le tableau
+const COLUMN_TYPE_CHOICES = [
+  { value: 'TEXT', label: 'Texte' },
+  { value: 'INTEGER', label: 'Entier' },
+  { value: 'REAL', label: 'Décimal' },
+  { value: 'COLOR', label: '🎨 Couleur' },
+  { value: 'IMAGE', label: '🖼 Image' },
+  { value: 'BOOLEAN', label: '☑ Case à cocher' },
+  { value: 'DATE', label: '📅 Date' },
+  { value: 'URL', label: '🔗 Lien (URL)' },
+];
+
+const KIND_LABELS = {
+  color: '🎨 COULEUR',
+  image: '🖼 IMAGE',
+  boolean: '☑ BOOLÉEN',
+  date: '📅 DATE',
+  url: '🔗 URL',
+};
+
+function columnTypeOptionsHtml() {
+  return COLUMN_TYPE_CHOICES.map(c => `<option value="${c.value}">${escapeHtml(c.label)}</option>`).join('');
+}
+
+function resolveColumnChoice(value) {
+  switch (value) {
+    case 'COLOR': return { type: 'TEXT', kind: 'color' };
+    case 'IMAGE': return { type: 'TEXT', kind: 'image' };
+    case 'BOOLEAN': return { type: 'INTEGER', kind: 'boolean' };
+    case 'DATE': return { type: 'TEXT', kind: 'date' };
+    case 'URL': return { type: 'TEXT', kind: 'url' };
+    default: return { type: value, kind: null };
+  }
+}
+
 function showToast(message, type = 'info') {
   const container = document.getElementById('toastContainer');
   const toast = document.createElement('div');
@@ -357,7 +394,7 @@ function renderTabs() {
     tab.dataset.tableName = table.name;
     tab.innerHTML = `<span>${escapeHtml(table.name)}</span><button class="btn-rename-tab" title="Renommer cette table">✎</button><button class="btn-delete-tab" title="Supprimer cette table">×</button>`;
 
-    tab.querySelector('span').addEventListener('click', async () => {
+    tab.addEventListener('click', async () => {
       currentTable = table;
       resetTableView();
       await loadTableData();
@@ -390,7 +427,11 @@ function renderTabs() {
 
     tab.querySelector('.btn-delete-tab').addEventListener('click', async (e) => {
       e.stopPropagation();
-      const confirmed = await showConfirm(`Supprimer définitivement la table « ${table.name} » ?`, 'Supprimer la table');
+      const refs = await fetchTableReferences(currentDb.id, table.name);
+      const message = refs.length > 0
+        ? `Cette table est référencée ailleurs :\n${formatTableReferenceLines(refs).join('\n')}\n\nLa supprimer laissera ces liaisons orphelines. Supprimer quand même « ${table.name} » ?`
+        : `Supprimer définitivement la table « ${table.name} » ?`;
+      const confirmed = await showConfirm(message, refs.length > 0 ? '⚠️ Table référencée ailleurs' : 'Supprimer la table');
       if (!confirmed) return;
 
       try {
@@ -447,6 +488,62 @@ btnViewGraph.addEventListener('click', () => {
   if (!currentDb || viewMode === 'graph') return;
   enterGraphMode();
 });
+
+// vérifie si d'autres tables pointent (via une liaison logique) vers cette ligne ou cette table,
+// pour avertir avant une suppression qui laisserait des liaisons orphelines
+async function fetchRowReferences(dbId, tableName, rowId) {
+  try {
+    const res = await fetch(`/api/${dbId}/${tableName}/${rowId}/references`);
+    return res.ok ? await res.json() : [];
+  } catch {
+    return [];
+  }
+}
+
+async function fetchTableReferences(dbId, tableName) {
+  try {
+    const res = await fetch(`/api/${dbId}/tables/${tableName}/references`);
+    return res.ok ? await res.json() : [];
+  } catch {
+    return [];
+  }
+}
+
+// agrège des références ligne-à-ligne (avec compteur) par table/colonne
+function formatRowReferenceLines(refs) {
+  const byKey = {};
+  refs.forEach(r => {
+    const key = `${r.table}|${r.column}`;
+    byKey[key] = (byKey[key] || 0) + r.count;
+  });
+  return Object.entries(byKey).map(([key, count]) => {
+    const [table, column] = key.split('|');
+    return `• ${count} ligne(s) dans « ${table} » (colonne « ${column} »)`;
+  });
+}
+
+// liste les colonnes d'autres tables qui référencent une table qu'on s'apprête à supprimer
+function formatTableReferenceLines(refs) {
+  return refs.map(r => `• colonne « ${r.column} » dans « ${r.table} »`);
+}
+
+// sauvegarde la valeur d'une cellule et alimente la pile d'annulation ; lève en cas d'échec
+async function saveCellValue(rowId, column, newValue, oldValue) {
+  const res = await fetch(`/api/${currentDb.id}/${currentTable.name}/${rowId}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ [column]: newValue === '' ? null : newValue })
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error || 'Échec de la sauvegarde');
+  }
+  undoStack.push({ dbId: currentDb.id, tableName: currentTable.name, rowId, column, oldValue, newValue });
+  if (undoStack.length > UNDO_LIMIT) undoStack.shift();
+  redoStack = [];
+  updateUndoButton();
+  updateRedoButton();
+}
 
 function renderContent() {
   const content = document.getElementById('content');
@@ -540,6 +637,7 @@ function renderContent() {
       const cell = row[col] ?? '';
       const isId = col === 'id';
       const relation = (currentTableData.relations || []).find(r => r.column === col);
+      const kind = currentTableData.columnKinds ? currentTableData.columnKinds[col] : null;
 
       if (relation) {
         const options = (currentTableData.relationOptions && currentTableData.relationOptions[col]) || [];
@@ -553,8 +651,37 @@ function renderContent() {
         return;
       }
 
+      if (kind === 'boolean') {
+        html += `<td class="bool-cell" data-column="${escapeHtml(col)}"><input type="checkbox" class="bool-checkbox" ${cell ? 'checked' : ''}></td>`;
+        return;
+      }
+
+      if (kind === 'date') {
+        html += `<td class="date-cell" data-column="${escapeHtml(col)}"><input type="date" class="date-input" value="${escapeHtml(cell)}"></td>`;
+        return;
+      }
+
+      if (kind === 'color') {
+        const hex = /^#[0-9a-fA-F]{6}$/.test(cell) ? cell : '#000000';
+        html += `<td class="color-cell" data-column="${escapeHtml(col)}"><input type="color" class="color-swatch" value="${hex}" title="Cliquer pour changer la couleur (code hexa saisissable dans la fenêtre système)"></td>`;
+        return;
+      }
+
+      if (kind === 'image') {
+        const safeSrc = cell ? ` src="${escapeHtml(cell)}"` : '';
+        const hiddenAttr = cell ? '' : ' style="visibility:hidden"';
+        html += `<td class="image-cell" data-column="${escapeHtml(col)}">
+          <label class="image-thumb-wrap" title="Cliquer pour importer une image">
+            <img class="image-thumb"${safeSrc}${hiddenAttr} alt="" onerror="this.style.visibility='hidden'" onload="this.style.visibility='visible'">
+            <input type="file" accept="image/*" class="image-file-input" hidden>
+          </label>
+        </td>`;
+        return;
+      }
+
       const isNum = !isId && typeof row[col] === 'number';
-      const cls = isId ? 'col-id' : `editable ${isNum ? 'cell-num' : (i === 0 ? 'cell-dim' : '')}`;
+      const kindCls = kind === 'url' ? ' cell-url' : '';
+      const cls = isId ? 'col-id' : `editable ${isNum ? 'cell-num' : (i === 0 ? 'cell-dim' : '')}${kindCls}`;
       const editableAttr = isId ? '' : 'contenteditable="true"';
       html += `<td class="${cls}" data-column="${escapeHtml(col)}" ${editableAttr}>${escapeHtml(cell)}</td>`;
     });
@@ -610,7 +737,11 @@ function renderContent() {
   content.querySelectorAll('.btn-delete-row').forEach(btn => {
     btn.addEventListener('click', async () => {
       const rowId = btn.closest('tr').dataset.rowId;
-      const confirmed = await showConfirm('Supprimer définitivement cette ligne ?', 'Supprimer la ligne');
+      const refs = await fetchRowReferences(currentDb.id, currentTable.name, rowId);
+      const message = refs.length > 0
+        ? `Cette ligne est référencée ailleurs :\n${formatRowReferenceLines(refs).join('\n')}\n\nLa supprimer quand même laissera ces liaisons orphelines. Continuer ?`
+        : 'Supprimer définitivement cette ligne ?';
+      const confirmed = await showConfirm(message, refs.length > 0 ? '⚠️ Ligne référencée ailleurs' : 'Supprimer la ligne');
       if (!confirmed) return;
 
       try {
@@ -635,25 +766,11 @@ function renderContent() {
 
     select.addEventListener('change', async () => {
       const newValue = select.value;
-      const tr = select.closest('tr');
-      const rowId = tr.dataset.rowId;
+      const rowId = select.closest('tr').dataset.rowId;
       const column = select.closest('td').dataset.column;
 
       try {
-        const res = await fetch(`/api/${currentDb.id}/${currentTable.name}/${rowId}`, {
-          method: 'PATCH',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ [column]: newValue === '' ? null : newValue })
-        });
-        if (!res.ok) {
-          const data = await res.json().catch(() => ({}));
-          throw new Error(data.error || 'Échec de la sauvegarde');
-        }
-        undoStack.push({ dbId: currentDb.id, tableName: currentTable.name, rowId, column, oldValue: original, newValue });
-        if (undoStack.length > UNDO_LIMIT) undoStack.shift();
-        redoStack = [];
-        updateUndoButton();
-        updateRedoButton();
+        await saveCellValue(rowId, column, newValue, original);
       } catch (err) {
         showToast(err.message, 'error');
         select.value = original;
@@ -675,8 +792,7 @@ function renderContent() {
       const newValue = td.textContent.trim();
       if (newValue === original) return;
 
-      const tr = td.closest('tr');
-      const rowId = tr.dataset.rowId;
+      const rowId = td.closest('tr').dataset.rowId;
       const column = td.dataset.column;
       const colType = columnTypes ? columnTypes[column] : undefined;
 
@@ -692,26 +808,85 @@ function renderContent() {
       }
 
       try {
-        const res = await fetch(`/api/${currentDb.id}/${currentTable.name}/${rowId}`, {
-          method: 'PATCH',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ [column]: newValue === '' ? null : newValue })
-        });
-        if (!res.ok) {
-          const data = await res.json().catch(() => ({}));
-          throw new Error(data.error || 'Échec de la sauvegarde');
-        }
-        undoStack.push({ dbId: currentDb.id, tableName: currentTable.name, rowId, column, oldValue: original, newValue });
-        if (undoStack.length > UNDO_LIMIT) undoStack.shift();
-        redoStack = [];
-        updateUndoButton();
-        updateRedoButton();
+        await saveCellValue(rowId, column, newValue, original);
         td.classList.add('saved');
         setTimeout(() => td.classList.remove('saved'), 600);
       } catch (err) {
         showToast(err.message, 'error');
         td.textContent = original;
       }
+    });
+  });
+
+  content.querySelectorAll('td.bool-cell input.bool-checkbox').forEach(input => {
+    input.addEventListener('change', async () => {
+      const rowId = input.closest('tr').dataset.rowId;
+      const column = input.closest('td').dataset.column;
+      const newValue = input.checked ? 1 : 0;
+
+      try {
+        await saveCellValue(rowId, column, newValue, input.checked ? 0 : 1);
+      } catch (err) {
+        showToast(err.message, 'error');
+        input.checked = !input.checked;
+      }
+    });
+  });
+
+  content.querySelectorAll('td.date-cell input.date-input').forEach(input => {
+    const original = input.value;
+    input.addEventListener('change', async () => {
+      const rowId = input.closest('tr').dataset.rowId;
+      const column = input.closest('td').dataset.column;
+
+      try {
+        await saveCellValue(rowId, column, input.value, original);
+      } catch (err) {
+        showToast(err.message, 'error');
+        input.value = original;
+      }
+    });
+  });
+
+  content.querySelectorAll('td.color-cell').forEach(td => {
+    const swatch = td.querySelector('.color-swatch');
+    const rowId = td.closest('tr').dataset.rowId;
+    const column = td.dataset.column;
+    const original = swatch.value;
+
+    swatch.addEventListener('change', async () => {
+      try {
+        await saveCellValue(rowId, column, swatch.value, original);
+      } catch (err) {
+        showToast(err.message, 'error');
+        swatch.value = original;
+      }
+    });
+  });
+
+  content.querySelectorAll('td.image-cell').forEach(td => {
+    const img = td.querySelector('.image-thumb');
+    const fileInput = td.querySelector('.image-file-input');
+    const rowId = td.closest('tr').dataset.rowId;
+    const column = td.dataset.column;
+    const original = img.getAttribute('src') || '';
+
+    fileInput.addEventListener('change', async () => {
+      const file = fileInput.files[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = async () => {
+        img.style.visibility = 'visible';
+        img.src = reader.result;
+        try {
+          await saveCellValue(rowId, column, reader.result, original);
+        } catch (err) {
+          showToast(err.message, 'error');
+          img.src = original;
+          if (!original) img.style.visibility = 'hidden';
+        }
+      };
+      reader.readAsDataURL(file);
     });
   });
 }
@@ -779,16 +954,31 @@ async function enterGraphMode() {
   if (viewMode === 'graph') renderAll();
 }
 
-// place les tables sans position connue à gauche pour les tables référencées
-// (lookups) et à droite pour celles qui les référencent, comme un diagramme ER
+// hauteur visuelle attendue d'un nœud, pour espacer les tables sans qu'elles se chevauchent
+// (doit rester cohérent avec .graph-node-header et le max-height de .graph-node-body en CSS)
+function estimateNodeHeight(tableName) {
+  const schema = graphCache.schemas[tableName];
+  const colCount = schema ? Math.max(1, schema.columns.length) : 1;
+  const HEADER_H = 38;
+  const ROW_H = 26;
+  const MAX_BODY_H = 260;
+  return HEADER_H + Math.min(colCount * ROW_H + 8, MAX_BODY_H);
+}
+
+// place les tables sans position connue à gauche pour les tables référencées (lookups)
+// et à droite pour celles qui les référencent, comme un diagramme ER, puis réordonne
+// chaque colonne par barycentre (quelques passes façon Sugiyama) pour limiter les
+// croisements de liaisons, et espace verticalement selon la hauteur réelle de chaque table
 function computeAutoLayout(tables, relations) {
   const names = tables.map(t => t.name);
   const level = Object.fromEntries(names.map(n => [n, 0]));
   const dependsOn = Object.fromEntries(names.map(n => [n, []]));
+  const dependents = Object.fromEntries(names.map(n => [n, []]));
 
   (relations || []).forEach(rel => {
     if (dependsOn[rel.table] && names.includes(rel.refTable) && rel.refTable !== rel.table) {
       dependsOn[rel.table].push(rel.refTable);
+      dependents[rel.refTable].push(rel.table);
     }
   });
 
@@ -805,17 +995,45 @@ function computeAutoLayout(tables, relations) {
     if (!changed) break;
   }
 
-  const columns = {};
-  names.slice().sort().forEach(n => {
-    (columns[level[n]] = columns[level[n]] || []).push(n);
-  });
+  const maxLevel = names.reduce((m, n) => Math.max(m, level[n]), 0);
+  const columns = [];
+  for (let l = 0; l <= maxLevel; l++) columns.push(names.filter(n => level[n] === l).sort());
 
-  const COL_WIDTH = 300;
-  const ROW_HEIGHT = 220;
+  const indexInColumn = () => {
+    const pos = {};
+    columns.forEach(col => col.forEach((n, i) => { pos[n] = i; }));
+    return pos;
+  };
+
+  const barycenterSort = (neighborsOf) => {
+    let pos = indexInColumn();
+    columns.forEach((col, colIdx) => {
+      const scored = col.map(n => {
+        const neighborPositions = (neighborsOf[n] || []).map(nb => pos[nb]).filter(p => p !== undefined);
+        const bary = neighborPositions.length
+          ? neighborPositions.reduce((a, b) => a + b, 0) / neighborPositions.length
+          : pos[n];
+        return { n, bary };
+      });
+      scored.sort((a, b) => a.bary - b.bary);
+      columns[colIdx] = scored.map(s => s.n);
+      pos = indexInColumn();
+    });
+  };
+
+  for (let iter = 0; iter < 4; iter++) {
+    barycenterSort(dependsOn);
+    barycenterSort(dependents);
+  }
+
+  const COL_WIDTH = 340;
+  const GAP_Y = 50;
   const positions = {};
-  Object.keys(columns).map(Number).sort((a, b) => a - b).forEach(col => {
-    columns[col].forEach((name, row) => {
-      positions[name] = { x: 40 + col * COL_WIDTH, y: 40 + row * ROW_HEIGHT };
+  columns.forEach((col, colIdx) => {
+    let y = 40;
+    col.forEach(name => {
+      positions[name] = { x: 40 + colIdx * COL_WIDTH, y };
+      y += estimateNodeHeight(name) + GAP_Y;
     });
   });
 
@@ -915,9 +1133,44 @@ function setGraphZoom(newZoom, pivot) {
   drawGraphRelations(canvas, document.getElementById('graphSvg'));
 }
 
+// palette de couleurs distinctes pour différencier les liaisons entre elles
+const RELATION_PALETTE = ['#e8a33d', '#4fbf7a', '#4a90d9', '#d9622b', '#9b59b6', '#2ec4b6', '#e05a5a', '#e07bb0'];
+
+function hashString(s) {
+  let h = 0;
+  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0;
+  return Math.abs(h);
+}
+
+function relationColor(rel) {
+  const key = `${rel.table}.${rel.column}>${rel.refTable}.${rel.refColumn}`;
+  return RELATION_PALETTE[hashString(key) % RELATION_PALETTE.length];
+}
+
+// remplit les connecteurs impliqués dans une liaison avec la couleur de celle-ci ;
+// réinitialise d'abord tous les connecteurs pour effacer les liaisons supprimées
+function updateConnectorFills(canvas) {
+  canvas.querySelectorAll('.graph-connector.graph-connector-filled').forEach(el => {
+    el.classList.remove('graph-connector-filled');
+    el.style.removeProperty('--connector-color');
+  });
+
+  (graphCache.relations || []).forEach(rel => {
+    const color = relationColor(rel);
+    const fromEl = canvas.querySelector(`.graph-connector-out[data-table="${rel.table}"][data-column="${rel.column}"]`);
+    const toEl = canvas.querySelector(`.graph-connector-in[data-table="${rel.refTable}"][data-column="${rel.refColumn}"]`);
+    [fromEl, toEl].forEach(el => {
+      if (!el) return;
+      el.classList.add('graph-connector-filled');
+      el.style.setProperty('--connector-color', color);
+    });
+  });
+}
+
 function drawGraphRelations(canvas, svg) {
   resizeGraphSurface(canvas);
   svg.innerHTML = '';
+  updateConnectorFills(canvas);
 
   (graphCache.relations || []).forEach(rel => {
     const fromEl = canvas.querySelector(`.graph-connector-out[data-table="${rel.table}"][data-column="${rel.column}"]`);
@@ -927,6 +1180,7 @@ function drawGraphRelations(canvas, svg) {
     const p1 = getConnectorPoint(fromEl, canvas);
     const p2 = getConnectorPoint(toEl, canvas);
     const d = bezierPath(p1, p2);
+    const color = relationColor(rel);
 
     const g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
     g.setAttribute('class', 'graph-rel');
@@ -938,6 +1192,7 @@ function drawGraphRelations(canvas, svg) {
     const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
     path.setAttribute('d', d);
     path.setAttribute('class', 'graph-rel-path');
+    path.style.stroke = color;
     g.appendChild(path);
 
     const hit = document.createElementNS('http://www.w3.org/2000/svg', 'path');
@@ -950,6 +1205,8 @@ function drawGraphRelations(canvas, svg) {
     dot.setAttribute('cy', (p1.y + p2.y) / 2);
     dot.setAttribute('r', 7);
     dot.setAttribute('class', 'graph-rel-dot');
+    dot.style.fill = color;
+    dot.style.stroke = color;
     g.appendChild(dot);
 
     g.addEventListener('click', async () => {
@@ -1277,8 +1534,8 @@ formNewDb.addEventListener('submit', async (e) => {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ name, icon })
     });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || 'Erreur inconnue');
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || `Erreur inconnue (${res.status})`);
 
     closeNewDbModal();
     await loadDatabases();
@@ -1338,8 +1595,8 @@ formImportDb.addEventListener('submit', async (e) => {
       headers: { 'Content-Type': 'application/octet-stream' },
       body: fileBuffer
     });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || 'Erreur inconnue');
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || `Erreur inconnue (${res.status})`);
 
     closeImportDbModal();
     await loadDatabases();
@@ -1372,11 +1629,7 @@ function addColumnRow(name = '', type = 'TEXT') {
   row.innerHTML = `
     <span class="col-drag-handle" draggable="true" title="Glisser pour réordonner">⋮⋮</span>
     <input type="text" class="col-name" placeholder="nom de la colonne" value="${name}" required>
-    <select class="col-type">
-      <option value="TEXT">Texte</option>
-      <option value="INTEGER">Entier</option>
-      <option value="REAL">Décimal</option>
-    </select>
+    <select class="col-type">${columnTypeOptionsHtml()}</select>
     <button type="button" class="btn-remove-col" title="Supprimer">×</button>
   `;
   row.querySelector('.col-type').value = type;
@@ -1412,7 +1665,7 @@ formNewTable.addEventListener('submit', async (e) => {
   const rows = Array.from(columnsList.querySelectorAll('.column-row'));
   const columns = rows.map(row => ({
     name: row.querySelector('.col-name').value.trim(),
-    type: row.querySelector('.col-type').value
+    ...resolveColumnChoice(row.querySelector('.col-type').value)
   })).filter(c => c.name);
 
   if (columns.length === 0) {
@@ -1426,8 +1679,8 @@ formNewTable.addEventListener('submit', async (e) => {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ tableName, columns })
     });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || 'Erreur inconnue');
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || `Erreur inconnue (${res.status})`);
 
     closeNewTableModal();
     await loadDatabases();
@@ -1458,6 +1711,7 @@ function openNewRowModal() {
     .filter(col => col !== 'id')
     .forEach(col => {
       const relation = (currentTableData.relations || []).find(r => r.column === col);
+      const kind = currentTableData.columnKinds ? currentTableData.columnKinds[col] : null;
       const label = document.createElement('label');
 
       if (relation) {
@@ -1468,6 +1722,24 @@ function openNewRowModal() {
         });
         selectHtml += `</select>`;
         label.innerHTML = `${escapeHtml(col)}${selectHtml}`;
+      } else if (kind === 'boolean') {
+        label.innerHTML = `${escapeHtml(col)}<input type="checkbox" class="row-field" data-column="${escapeHtml(col)}">`;
+      } else if (kind === 'date') {
+        label.innerHTML = `${escapeHtml(col)}<input type="date" class="row-field" data-column="${escapeHtml(col)}">`;
+      } else if (kind === 'url') {
+        label.innerHTML = `${escapeHtml(col)}<input type="url" class="row-field" data-column="${escapeHtml(col)}" placeholder="https://...">`;
+      } else if (kind === 'color') {
+        label.innerHTML = `${escapeHtml(col)}
+          <div class="row-field-pair row-field-color">
+            <input type="color" class="row-field-color-swatch" value="#000000">
+            <input type="text" class="row-field" data-column="${escapeHtml(col)}" placeholder="#rrggbb">
+          </div>`;
+      } else if (kind === 'image') {
+        label.innerHTML = `${escapeHtml(col)}
+          <div class="row-field-pair row-field-image">
+            <input type="text" class="row-field" data-column="${escapeHtml(col)}" placeholder="URL ou importer...">
+            <label class="image-upload-btn" title="Importer une image">📁<input type="file" accept="image/*" class="row-field-image-file" hidden></label>
+          </div>`;
       } else {
         const type = currentTableData.columnTypes ? currentTableData.columnTypes[col] : undefined;
         const inputType = (type === 'INTEGER' || type === 'REAL') ? 'number' : 'text';
@@ -1477,6 +1749,22 @@ function openNewRowModal() {
 
       rowFieldsList.appendChild(label);
     });
+
+  // relie les widgets compagnons (roue de couleur, import de fichier) à leur champ texte
+  rowFieldsList.querySelectorAll('.row-field-color-swatch').forEach(swatch => {
+    const text = swatch.closest('.row-field-color').querySelector('.row-field');
+    swatch.addEventListener('input', () => { text.value = swatch.value; });
+  });
+  rowFieldsList.querySelectorAll('.row-field-image-file').forEach(fileInput => {
+    const text = fileInput.closest('.row-field-image').querySelector('.row-field');
+    fileInput.addEventListener('change', () => {
+      const file = fileInput.files[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = () => { text.value = reader.result; };
+      reader.readAsDataURL(file);
+    });
+  });
 
   modalNewRow.classList.add('open');
   const firstInput = rowFieldsList.querySelector('input');
@@ -1499,7 +1787,11 @@ formNewRow.addEventListener('submit', async (e) => {
 
   const data = {};
   rowFieldsList.querySelectorAll('.row-field').forEach(input => {
-    data[input.dataset.column] = input.value === '' ? null : input.value;
+    if (input.type === 'checkbox') {
+      data[input.dataset.column] = input.checked ? 1 : 0;
+    } else {
+      data[input.dataset.column] = input.value === '' ? null : input.value;
+    }
   });
 
   try {
@@ -1508,8 +1800,8 @@ formNewRow.addEventListener('submit', async (e) => {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(data)
     });
-    const result = await res.json();
-    if (!res.ok) throw new Error(result.error || 'Erreur inconnue');
+    const result = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(result.error || `Erreur inconnue (${res.status})`);
 
     closeNewRowModal();
     await loadDatabases();
@@ -1611,8 +1903,8 @@ document.getElementById('csvFileInput').addEventListener('change', async (e) => 
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ rows: cleanedRows })
     });
-    const result = await res.json();
-    if (!res.ok) throw new Error(result.error || 'Échec de l\'import');
+    const result = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(result.error || `Échec de l'import (${res.status})`);
 
     showToast(`${result.inserted} ligne(s) importée(s) avec succès.`, 'success');
     await loadDatabases();
@@ -1642,6 +1934,8 @@ function renderEditColumnsList() {
 
   currentTableData.columns.filter(c => c !== 'id').forEach(col => {
     const type = currentTableData.columnTypes ? currentTableData.columnTypes[col] : 'TEXT';
+    const kind = currentTableData.columnKinds ? currentTableData.columnKinds[col] : null;
+    const typeLabel = kind && KIND_LABELS[kind] ? KIND_LABELS[kind] : type;
     const relation = (currentTableData.relations || []).find(r => r.column === col);
 
     const block = document.createElement('div');
@@ -1651,7 +1945,7 @@ function renderEditColumnsList() {
     row.className = 'edit-column-row';
     row.innerHTML = `
       <input type="text" class="edit-col-name" value="${escapeHtml(col)}">
-      <span class="edit-col-type">${escapeHtml(type)}</span>
+      <span class="edit-col-type">${escapeHtml(typeLabel)}</span>
       <button type="button" class="btn-link-col${relation ? ' linked' : ''}" title="${relation ? `Lié à ${relation.refTable}.${relation.refColumn}` : 'Lier à une autre table'}">🔗</button>
       <button type="button" class="btn-save-col" title="Renommer">✓</button>
       <button type="button" class="btn-remove-col" title="Supprimer la colonne">×</button>
@@ -1794,6 +2088,8 @@ function renderEditColumnsList() {
   });
 }
 
+document.getElementById('inputNewColType').innerHTML = columnTypeOptionsHtml();
+
 function openEditColumnsModal() {
   if (!currentTable) return;
   errorEditColumns.textContent = '';
@@ -1817,14 +2113,14 @@ formAddColumn.addEventListener('submit', async (e) => {
   errorEditColumns.textContent = '';
 
   const name = document.getElementById('inputNewColName').value.trim();
-  const type = document.getElementById('inputNewColType').value;
+  const choice = resolveColumnChoice(document.getElementById('inputNewColType').value);
   if (!name) return;
 
   try {
     const res = await fetch(`/api/${currentDb.id}/${currentTable.name}/columns`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name, type })
+      body: JSON.stringify({ name, type: choice.type, kind: choice.kind })
     });
     if (!res.ok) {
       const data = await res.json().catch(() => ({}));
@@ -1873,8 +2169,8 @@ document.getElementById('btnRunQuery').addEventListener('click', async () => {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ sql })
     });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || 'Erreur inconnue');
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || `Erreur inconnue (${res.status})`);
 
     if (data.rows.length === 0) {
       queryResults.innerHTML = '<div class="query-empty">Aucun résultat.</div>';
@@ -1942,7 +2238,15 @@ document.getElementById('searchInput').addEventListener('input', (e) => {
 document.getElementById('btnDeleteSelected').addEventListener('click', async () => {
   if (!currentDb || !currentTable || selectedRowIds.size === 0) return;
   const ids = Array.from(selectedRowIds);
-  const confirmed = await showConfirm(`Supprimer définitivement ${ids.length} ligne(s) sélectionnée(s) ?`, 'Supprimer la sélection');
+
+  const allRefs = (await Promise.all(
+    ids.map(id => fetchRowReferences(currentDb.id, currentTable.name, id))
+  )).flat();
+
+  const message = allRefs.length > 0
+    ? `Certaines lignes sélectionnées sont référencées ailleurs :\n${formatRowReferenceLines(allRefs).join('\n')}\n\nLes supprimer quand même laissera ces liaisons orphelines. Supprimer les ${ids.length} ligne(s) sélectionnée(s) ?`
+    : `Supprimer définitivement ${ids.length} ligne(s) sélectionnée(s) ?`;
+  const confirmed = await showConfirm(message, allRefs.length > 0 ? '⚠️ Lignes référencées ailleurs' : 'Supprimer la sélection');
   if (!confirmed) return;
 
   try {

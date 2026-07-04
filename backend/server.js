@@ -8,7 +8,8 @@ const { requireAuth } = require('./auth');
 const app = express();
 const PORT = 3000;
 
-app.use(express.json());
+// limite relevée pour accepter les images importées en base64 (data URI) dans les lignes
+app.use(express.json({ limit: '15mb' }));
 
 // Sert le frontend (HTML/CSS/JS statiques) — la page elle-même ne contient
 // aucune donnée sensible, seule l'API ci-dessous est protégée
