@@ -101,6 +101,66 @@ function createDatabase(name, icon) {
   return entry;
 }
 
+const SQLITE_HEADER = Buffer.from('SQLite format 3\0', 'binary');
+
+function backupDatabase(dbId) {
+  const registry = loadRegistry();
+  const config = registry.find(d => d.id === dbId);
+  if (!config) throw new Error(`Base de données inconnue: ${dbId}`);
+
+  // s'assure que toutes les écritures en attente (WAL) sont bien sur disque
+  if (connections[dbId]) {
+    connections[dbId].pragma('wal_checkpoint(TRUNCATE)');
+  }
+
+  return {
+    filePath: path.join(DB_DIR, config.file),
+    filename: `${config.name}.db`,
+  };
+}
+
+function importDatabase(name, icon, fileBuffer) {
+  if (fileBuffer.length < 16 || !fileBuffer.subarray(0, 16).equals(SQLITE_HEADER)) {
+    throw new Error("Le fichier fourni n'est pas une base SQLite valide.");
+  }
+
+  const registry = loadRegistry();
+  let id = slugify(name);
+
+  let suffix = 1;
+  let uniqueId = id;
+  while (registry.find(d => d.id === uniqueId)) {
+    uniqueId = `${id}_${suffix++}`;
+  }
+  id = uniqueId;
+
+  const file = `${id}.db`;
+  const filePath = path.join(DB_DIR, file);
+  fs.writeFileSync(filePath, fileBuffer);
+
+  try {
+    const db = new Database(filePath);
+    db.pragma('quick_check');
+    connections[id] = db;
+  } catch (err) {
+    fs.unlinkSync(filePath);
+    throw new Error("Impossible d'ouvrir le fichier importé : " + err.message);
+  }
+
+  const entry = {
+    id,
+    name,
+    icon: icon || '🗂️',
+    file,
+    order: registry.length,
+    tableOrder: [],
+  };
+  registry.push(entry);
+  saveRegistry(registry);
+
+  return entry;
+}
+
 function deleteDatabase(dbId) {
   const registry = loadRegistry();
   const config = registry.find(d => d.id === dbId);
@@ -420,6 +480,8 @@ module.exports = {
   getConnection,
   listDatabases,
   createDatabase,
+  backupDatabase,
+  importDatabase,
   deleteDatabase,
   reorderDatabases,
   reorderTables,

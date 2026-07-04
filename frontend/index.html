@@ -19,12 +19,16 @@
     </div>
     <ul class="db-list" id="dbList"></ul>
 
-    <button class="btn-new-db" id="btnNewDb">+ <span class="label-text">Nouvelle base</span></button>
+    <div class="sidebar-buttons">
+      <button class="btn-new-db" id="btnNewDb">+ <span class="label-text">Nouvelle base</span></button>
+      <button class="btn-import-db" id="btnImportDb" title="Importer une base .db">⇪</button>
+    </div>
 
     <div class="sidebar-footer" id="sidebarFooter">
       Node.js · SQLite<br>
       Chargement...
     </div>
+    <button class="btn-logout" id="btnLogout">Déconnexion</button>
   </aside>
 
   <div class="sidebar-backdrop" id="sidebarBackdrop"></div>
@@ -107,6 +111,29 @@
       <div class="modal-actions">
         <button type="button" class="btn-secondary" id="cancelNewDb">Annuler</button>
         <button type="submit" class="btn-primary">Créer</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- MODALE : importer une base .db -->
+<div class="modal-overlay" id="modalImportDb">
+  <div class="modal">
+    <h2>Importer une base</h2>
+    <form id="formImportDb">
+      <label>Nom de la base
+        <input type="text" id="inputImportDbName" placeholder="ex : sauvegarde" required>
+      </label>
+      <label>Icône (un emoji)
+        <input type="text" id="inputImportDbIcon" placeholder="🗂️" maxlength="2">
+      </label>
+      <label>Fichier .db
+        <input type="file" id="inputImportDbFile" accept=".db" required>
+      </label>
+      <p class="form-error" id="errorImportDb"></p>
+      <div class="modal-actions">
+        <button type="button" class="btn-secondary" id="cancelImportDb">Annuler</button>
+        <button type="submit" class="btn-primary" id="btnSubmitImportDb">Importer</button>
       </div>
     </form>
   </div>
