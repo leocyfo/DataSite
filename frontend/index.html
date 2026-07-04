@@ -8,17 +8,18 @@
 </head>
 <body>
 
-<div class="app">
+<div class="app" id="app">
 
   <!-- SIDEBAR -->
-  <aside class="sidebar">
+  <aside class="sidebar" id="sidebar">
+    <button class="btn-sidebar-toggle" id="btnSidebarToggle" title="Réduire la sidebar">‹</button>
     <div class="sidebar-header">
-      <div class="logo"><span class="dot"></span> DB EXPLORER</div>
+      <div class="logo"><span class="dot"></span><span class="logo-text"> DB EXPLORER</span></div>
       <div class="subtitle">localhost — connexions locales</div>
     </div>
     <ul class="db-list" id="dbList"></ul>
 
-    <button class="btn-new-db" id="btnNewDb">+ Nouvelle base</button>
+    <button class="btn-new-db" id="btnNewDb">+ <span class="label-text">Nouvelle base</span></button>
 
     <div class="sidebar-footer" id="sidebarFooter">
       Node.js · SQLite<br>
@@ -26,13 +27,47 @@
     </div>
   </aside>
 
+  <div class="sidebar-backdrop" id="sidebarBackdrop"></div>
+
   <!-- MAIN -->
   <main class="main">
     <div class="topbar">
-      <div class="topbar-title">
-        <h1 id="dbTitle">—</h1>
-        <span class="path" id="dbPath">—</span>
+      <button class="btn-mobile-menu" id="btnMobileMenu" title="Ouvrir le menu">☰</button>
+
+      <div class="content-toolbar" id="contentToolbar">
+        <div class="toolbar-actions">
+          <button class="btn-toolbar" id="btnAddRow">+ Ligne</button>
+          <input type="file" id="csvFileInput" accept=".csv" hidden>
+
+          <div class="menu-item">
+            <button class="btn-toolbar menu-trigger" id="btnFileMenu">Fichier <span class="menu-caret">▾</span></button>
+            <div class="menu-dropdown" id="fileMenuDropdown">
+              <button class="menu-option" id="btnImportCsv">⇪ Importer CSV</button>
+              <button class="menu-option" id="btnExportCsv">⇩ Exporter CSV</button>
+              <button class="menu-option" id="btnExportJson">⇩ Exporter JSON</button>
+            </div>
+          </div>
+
+          <button class="btn-toolbar" id="btnEditColumns">⚙ Colonnes</button>
+
+          <div class="toolbar-inner-divider"></div>
+
+          <div class="search-wrapper">
+            <span class="search-icon">🔍</span>
+            <input type="text" id="searchInput" class="search-input" placeholder="Rechercher...">
+          </div>
+        </div>
+        <button class="btn-toolbar btn-toolbar-danger" id="btnDeleteSelected" hidden>🗑 Supprimer (0)</button>
       </div>
+
+      <div class="topbar-center">
+        <button class="btn-nav-arrow" id="btnUndo" title="Annuler la dernière modification de cellule" disabled>↺</button>
+        <button class="btn-nav-arrow" id="btnRedo" title="Rétablir la modification annulée" disabled>↻</button>
+        <div class="topbar-title">
+          <h1 id="dbTitle">—</h1>
+        </div>
+      </div>
+
       <div class="topbar-stats">
         <div class="stat">
           <div class="val" id="statRows">0</div>
@@ -45,19 +80,11 @@
       </div>
     </div>
 
-    <div class="tabs" id="tabs"></div>
-
-    <div class="content-toolbar" id="contentToolbar">
-      <button class="btn-toolbar" id="btnAddRow">+ Ligne</button>
-      <button class="btn-toolbar" id="btnImportCsv">⇪ Importer CSV</button>
-      <input type="file" id="csvFileInput" accept=".csv" hidden>
-      <button class="btn-toolbar" id="btnExportCsv">⇩ CSV</button>
-      <button class="btn-toolbar" id="btnExportJson">⇩ JSON</button>
-      <button class="btn-toolbar" id="btnEditColumns">⚙ Colonnes</button>
-      <button class="btn-toolbar" id="btnUndo" title="Annuler la dernière modification de cellule" disabled>↩</button>
-      <button class="btn-toolbar btn-toolbar-danger" id="btnDeleteSelected" hidden>🗑 Supprimer (0)</button>
-      <input type="text" id="searchInput" class="search-input" placeholder="Rechercher...">
+    <div class="breadcrumb" id="breadcrumb">
+      <span class="path" id="dbPath">—</span>
     </div>
+
+    <div class="tabs" id="tabs"></div>
 
     <div class="content" id="content"></div>
     <div class="pagination" id="pagination"></div>
@@ -163,6 +190,21 @@
     <div id="queryResults" class="query-results"></div>
   </div>
 </div>
+
+<!-- MODALE : confirmation générique (remplace confirm()) -->
+<div class="modal-overlay" id="modalConfirm">
+  <div class="modal modal-confirm">
+    <h2 id="confirmTitle">Confirmer</h2>
+    <p id="confirmMessage"></p>
+    <div class="modal-actions">
+      <button type="button" class="btn-secondary" id="confirmCancel">Annuler</button>
+      <button type="button" class="btn-danger" id="confirmOk">Confirmer</button>
+    </div>
+  </div>
+</div>
+
+<!-- CONTENEUR DE NOTIFICATIONS -->
+<div class="toast-container" id="toastContainer"></div>
 
 <script src="script.js"></script>
 </body>

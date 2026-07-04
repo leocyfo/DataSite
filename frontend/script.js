@@ -7,6 +7,46 @@ function escapeHtml(value) {
     .replace(/'/g, '&#39;');
 }
 
+function showToast(message, type = 'info') {
+  const container = document.getElementById('toastContainer');
+  const toast = document.createElement('div');
+  toast.className = `toast toast-${type}`;
+  toast.textContent = message;
+  toast.addEventListener('click', () => toast.remove());
+  container.appendChild(toast);
+  setTimeout(() => {
+    toast.classList.add('toast-out');
+    toast.addEventListener('animationend', () => toast.remove());
+  }, 4000);
+}
+
+function showConfirm(message, title = 'Confirmer') {
+  const modal = document.getElementById('modalConfirm');
+  document.getElementById('confirmTitle').textContent = title;
+  document.getElementById('confirmMessage').textContent = message;
+  modal.classList.add('open');
+
+  return new Promise(resolve => {
+    const okBtn = document.getElementById('confirmOk');
+    const cancelBtn = document.getElementById('confirmCancel');
+
+    const cleanup = (result) => {
+      modal.classList.remove('open');
+      okBtn.removeEventListener('click', onOk);
+      cancelBtn.removeEventListener('click', onCancel);
+      modal.removeEventListener('click', onOverlay);
+      resolve(result);
+    };
+    const onOk = () => cleanup(true);
+    const onCancel = () => cleanup(false);
+    const onOverlay = (e) => { if (e.target === modal) cleanup(false); };
+
+    okBtn.addEventListener('click', onOk);
+    cancelBtn.addEventListener('click', onCancel);
+    modal.addEventListener('click', onOverlay);
+  });
+}
+
 let databases = [];
 let currentDb = null;
 let currentTable = null;
@@ -17,6 +57,7 @@ let currentPage = 1;
 const PAGE_SIZE = 50;
 let selectedRowIds = new Set();
 let undoStack = [];
+let redoStack = [];
 const UNDO_LIMIT = 20;
 
 function resetTableView() {
@@ -25,9 +66,11 @@ function resetTableView() {
   currentPage = 1;
   selectedRowIds = new Set();
   undoStack = [];
+  redoStack = [];
   const searchInput = document.getElementById('searchInput');
   if (searchInput) searchInput.value = '';
   updateUndoButton();
+  updateRedoButton();
   updateSelectionUi();
 }
 
@@ -38,6 +81,15 @@ function updateUndoButton() {
   btn.title = undoStack.length
     ? `Annuler la dernière modification de cellule (${undoStack.length} en mémoire)`
     : 'Annuler la dernière modification de cellule';
+}
+
+function updateRedoButton() {
+  const btn = document.getElementById('btnRedo');
+  if (!btn) return;
+  btn.disabled = redoStack.length === 0;
+  btn.title = redoStack.length
+    ? `Rétablir la modification annulée (${redoStack.length} en mémoire)`
+    : 'Rétablir la modification annulée';
 }
 
 function updateSelectionUi() {
@@ -209,13 +261,13 @@ function renderSidebar() {
         }
         await loadDatabases();
       } catch (err) {
-        alert(err.message);
+        showToast(err.message, 'error');
       }
     });
 
     li.querySelector('.btn-delete-db').addEventListener('click', async (e) => {
       e.stopPropagation(); // évite de sélectionner la base en cliquant sur la poubelle
-      const confirmed = confirm(`Supprimer définitivement « ${db.name} » et toutes ses données ?`);
+      const confirmed = await showConfirm(`Supprimer définitivement « ${db.name} » et toutes ses données ?`, 'Supprimer la base');
       if (!confirmed) return;
 
       try {
@@ -231,7 +283,7 @@ function renderSidebar() {
         }
         await loadDatabases();
       } catch (err) {
-        alert(err.message);
+        showToast(err.message, 'error');
       }
     });
     li.addEventListener('click', async () => {
@@ -245,16 +297,26 @@ function renderSidebar() {
   });
 }
 
+function renderBreadcrumbPath(fullPath) {
+  const dbPathEl = document.getElementById('dbPath');
+  dbPathEl.dataset.fullPath = fullPath;
+
+  const segments = fullPath.split('/').filter(s => s && s !== '.');
+  dbPathEl.innerHTML = segments
+    .map(seg => `<span class="crumb">${escapeHtml(seg)}</span>`)
+    .join('<span class="crumb-sep">›</span>');
+}
+
 function renderTopbar() {
   if (!currentDb) {
     document.getElementById('dbTitle').textContent = 'Aucune base sélectionnée';
-    document.getElementById('dbPath').textContent = '—';
+    renderBreadcrumbPath('—');
     document.getElementById('statRows').textContent = '0';
     document.getElementById('statTables').textContent = '0';
     return;
   }
   document.getElementById('dbTitle').textContent = currentDb.name;
-  document.getElementById('dbPath').textContent = `./backend/db/${currentDb.name}`;
+  renderBreadcrumbPath(`./backend/db/${currentDb.name}`);
   const totalRows = currentDb.tables.reduce((s, t) => s + t.rowCount, 0);
   document.getElementById('statRows').textContent = totalRows;
   document.getElementById('statTables').textContent = currentDb.tables.length;
@@ -299,13 +361,13 @@ function renderTabs() {
         }
         await loadDatabases();
       } catch (err) {
-        alert(err.message);
+        showToast(err.message, 'error');
       }
     });
 
     tab.querySelector('.btn-delete-tab').addEventListener('click', async (e) => {
       e.stopPropagation();
-      const confirmed = confirm(`Supprimer définitivement la table « ${table.name} » ?`);
+      const confirmed = await showConfirm(`Supprimer définitivement la table « ${table.name} » ?`, 'Supprimer la table');
       if (!confirmed) return;
 
       try {
@@ -319,7 +381,7 @@ function renderTabs() {
         }
         await loadDatabases();
       } catch (err) {
-        alert(err.message);
+        showToast(err.message, 'error');
       }
     });
 
@@ -494,7 +556,7 @@ function renderContent() {
   content.querySelectorAll('.btn-delete-row').forEach(btn => {
     btn.addEventListener('click', async () => {
       const rowId = btn.closest('tr').dataset.rowId;
-      const confirmed = confirm('Supprimer définitivement cette ligne ?');
+      const confirmed = await showConfirm('Supprimer définitivement cette ligne ?', 'Supprimer la ligne');
       if (!confirmed) return;
 
       try {
@@ -509,7 +571,7 @@ function renderContent() {
         await loadTableData();
         renderAll();
       } catch (err) {
-        alert(err.message);
+        showToast(err.message, 'error');
       }
     });
   });
@@ -533,11 +595,13 @@ function renderContent() {
           const data = await res.json().catch(() => ({}));
           throw new Error(data.error || 'Échec de la sauvegarde');
         }
-        undoStack.push({ dbId: currentDb.id, tableName: currentTable.name, rowId, column, oldValue: original });
+        undoStack.push({ dbId: currentDb.id, tableName: currentTable.name, rowId, column, oldValue: original, newValue });
         if (undoStack.length > UNDO_LIMIT) undoStack.shift();
+        redoStack = [];
         updateUndoButton();
+        updateRedoButton();
       } catch (err) {
-        alert(err.message);
+        showToast(err.message, 'error');
         select.value = original;
       }
     });
@@ -563,12 +627,12 @@ function renderContent() {
       const colType = columnTypes ? columnTypes[column] : undefined;
 
       if (colType === 'INTEGER' && newValue !== '' && !/^-?\d+$/.test(newValue)) {
-        alert(`La colonne « ${column} » attend un nombre entier.`);
+        showToast(`La colonne « ${column} » attend un nombre entier.`, 'error');
         td.textContent = original;
         return;
       }
       if (colType === 'REAL' && newValue !== '' && !/^-?\d+(\.\d+)?$/.test(newValue)) {
-        alert(`La colonne « ${column} » attend un nombre décimal.`);
+        showToast(`La colonne « ${column} » attend un nombre décimal.`, 'error');
         td.textContent = original;
         return;
       }
@@ -583,13 +647,15 @@ function renderContent() {
           const data = await res.json().catch(() => ({}));
           throw new Error(data.error || 'Échec de la sauvegarde');
         }
-        undoStack.push({ dbId: currentDb.id, tableName: currentTable.name, rowId, column, oldValue: original });
+        undoStack.push({ dbId: currentDb.id, tableName: currentTable.name, rowId, column, oldValue: original, newValue });
         if (undoStack.length > UNDO_LIMIT) undoStack.shift();
+        redoStack = [];
         updateUndoButton();
+        updateRedoButton();
         td.classList.add('saved');
         setTimeout(() => td.classList.remove('saved'), 600);
       } catch (err) {
-        alert(err.message);
+        showToast(err.message, 'error');
         td.textContent = original;
       }
     });
@@ -863,6 +929,26 @@ function parseCsv(text) {
   return { headers, rows };
 }
 
+function setupDropdownMenu(triggerId, dropdownId) {
+  const trigger = document.getElementById(triggerId);
+  const dropdown = document.getElementById(dropdownId);
+
+  trigger.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const isOpen = dropdown.classList.contains('open');
+    document.querySelectorAll('.menu-dropdown.open').forEach(d => d.classList.remove('open'));
+    if (!isOpen) dropdown.classList.add('open');
+  });
+  // les clics sur les options du menu ferment le menu naturellement en remontant
+  // jusqu'au listener global ci-dessous, après avoir déclenché leur propre action
+}
+
+document.addEventListener('click', () => {
+  document.querySelectorAll('.menu-dropdown.open').forEach(d => d.classList.remove('open'));
+});
+
+setupDropdownMenu('btnFileMenu', 'fileMenuDropdown');
+
 document.getElementById('btnImportCsv').addEventListener('click', () => {
   if (!currentTable) return;
   document.getElementById('csvFileInput').click();
@@ -881,10 +967,11 @@ document.getElementById('csvFileInput').addEventListener('change', async (e) => 
     const matchedHeaders = headers.filter(h => validColumns.includes(h));
 
     if (matchedHeaders.length === 0) {
-      alert(
+      showToast(
         `Aucune colonne du CSV ne correspond à celles de la table.\n` +
         `Colonnes attendues : ${validColumns.join(', ')}\n` +
-        `Colonnes trouvées : ${headers.join(', ')}`
+        `Colonnes trouvées : ${headers.join(', ')}`,
+        'error'
       );
       return;
     }
@@ -903,12 +990,12 @@ document.getElementById('csvFileInput').addEventListener('change', async (e) => 
     const result = await res.json();
     if (!res.ok) throw new Error(result.error || 'Échec de l\'import');
 
-    alert(`${result.inserted} ligne(s) importée(s) avec succès.`);
+    showToast(`${result.inserted} ligne(s) importée(s) avec succès.`, 'success');
     await loadDatabases();
     await loadTableData();
     renderAll();
   } catch (err) {
-    alert('Erreur lors de l\'import : ' + err.message);
+    showToast('Erreur lors de l\'import : ' + err.message, 'error');
   } finally {
     e.target.value = ''; 
   }
@@ -1059,7 +1146,7 @@ function renderEditColumnsList() {
     });
 
     row.querySelector('.btn-remove-col').addEventListener('click', async () => {
-      const confirmed = confirm(`Supprimer définitivement la colonne « ${col} » et ses données ?`);
+      const confirmed = await showConfirm(`Supprimer définitivement la colonne « ${col} » et ses données ?`, 'Supprimer la colonne');
       if (!confirmed) return;
 
       try {
@@ -1231,7 +1318,7 @@ document.getElementById('searchInput').addEventListener('input', (e) => {
 document.getElementById('btnDeleteSelected').addEventListener('click', async () => {
   if (!currentDb || !currentTable || selectedRowIds.size === 0) return;
   const ids = Array.from(selectedRowIds);
-  const confirmed = confirm(`Supprimer définitivement ${ids.length} ligne(s) sélectionnée(s) ?`);
+  const confirmed = await showConfirm(`Supprimer définitivement ${ids.length} ligne(s) sélectionnée(s) ?`, 'Supprimer la sélection');
   if (!confirmed) return;
 
   try {
@@ -1239,14 +1326,16 @@ document.getElementById('btnDeleteSelected').addEventListener('click', async () 
       fetch(`/api/${currentDb.id}/${currentTable.name}/${id}`, { method: 'DELETE' })
     ));
     const failed = results.filter(r => !r.ok).length;
+    const succeeded = results.length - failed;
     selectedRowIds = new Set();
     updateSelectionUi();
     await loadDatabases();
     await loadTableData();
     renderAll();
-    if (failed > 0) alert(`${failed} suppression(s) ont échoué.`);
+    if (succeeded > 0) showToast(`${succeeded} ligne(s) supprimée(s).`, 'success');
+    if (failed > 0) showToast(`${failed} suppression(s) ont échoué.`, 'error');
   } catch (err) {
-    alert(err.message);
+    showToast(err.message, 'error');
   }
 });
 
@@ -1265,10 +1354,39 @@ document.getElementById('btnUndo').addEventListener('click', async () => {
       const data = await res.json().catch(() => ({}));
       throw new Error(data.error || 'Échec de l\'annulation');
     }
+    redoStack.push(last);
+    updateRedoButton();
     await loadTableData();
     renderAll();
+    showToast('Modification annulée.', 'success');
   } catch (err) {
-    alert(err.message);
+    showToast(err.message, 'error');
+  }
+});
+
+document.getElementById('btnRedo').addEventListener('click', async () => {
+  const last = redoStack.pop();
+  updateRedoButton();
+  if (!last) return;
+
+  try {
+    const res = await fetch(`/api/${last.dbId}/${last.tableName}/${last.rowId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ [last.column]: last.newValue === '' ? null : last.newValue })
+    });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.error || 'Échec du rétablissement');
+    }
+    undoStack.push(last);
+    if (undoStack.length > UNDO_LIMIT) undoStack.shift();
+    updateUndoButton();
+    await loadTableData();
+    renderAll();
+    showToast('Modification rétablie.', 'success');
+  } catch (err) {
+    showToast(err.message, 'error');
   }
 });
 
@@ -1295,5 +1413,58 @@ enableDragReorder(document.getElementById('tabs'), '.tab:not(.tab-add)', 'horizo
 });
 
 enableDragReorder(document.getElementById('columnsList'), '.column-row', 'vertical', () => {});
+
+const sidebar = document.getElementById('sidebar');
+const sidebarBackdrop = document.getElementById('sidebarBackdrop');
+const btnSidebarToggle = document.getElementById('btnSidebarToggle');
+const btnMobileMenu = document.getElementById('btnMobileMenu');
+
+function setSidebarCollapsed(collapsed) {
+  sidebar.classList.toggle('collapsed', collapsed);
+  btnSidebarToggle.title = collapsed ? 'Agrandir la sidebar' : 'Réduire la sidebar';
+  localStorage.setItem('sidebarCollapsed', collapsed ? '1' : '0');
+}
+
+if (localStorage.getItem('sidebarCollapsed') === '1') {
+  setSidebarCollapsed(true);
+}
+
+btnSidebarToggle.addEventListener('click', () => {
+  setSidebarCollapsed(!sidebar.classList.contains('collapsed'));
+});
+
+function openMobileSidebar() {
+  sidebar.classList.add('mobile-open');
+  sidebarBackdrop.classList.add('visible');
+}
+
+function closeMobileSidebar() {
+  sidebar.classList.remove('mobile-open');
+  sidebarBackdrop.classList.remove('visible');
+}
+
+btnMobileMenu.addEventListener('click', () => {
+  if (sidebar.classList.contains('mobile-open')) closeMobileSidebar();
+  else openMobileSidebar();
+});
+
+sidebarBackdrop.addEventListener('click', closeMobileSidebar);
+
+// referme le tiroir mobile dès qu'une base est sélectionnée
+document.getElementById('dbList').addEventListener('click', (e) => {
+  if (e.target.closest('.db-item')) closeMobileSidebar();
+});
+
+document.getElementById('breadcrumb').addEventListener('click', async () => {
+  const fullPath = document.getElementById('dbPath').dataset.fullPath;
+  if (!fullPath || fullPath === '—') return;
+
+  try {
+    await navigator.clipboard.writeText(fullPath);
+    showToast('Chemin copié dans le presse-papiers.', 'success');
+  } catch (err) {
+    showToast('Impossible de copier le chemin.', 'error');
+  }
+});
 
 loadDatabases();
