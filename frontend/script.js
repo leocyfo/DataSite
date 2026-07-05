@@ -18,6 +18,12 @@ function escapeHtml(value) {
     .replace(/'/g, '&#39;');
 }
 
+// retire un emoji de tête (ex: "⚔️ Offensive" -> "Offensive") pour laisser toute
+// la place au texte lisible dans les listes déroulantes de liaison, trop étroites
+function stripLeadingEmoji(value) {
+  return String(value ?? '').replace(/^[\p{Extended_Pictographic}‍️\s]+/u, '').trim();
+}
+
 // types de colonne proposés à la création : les 3 premiers sont des types SQL natifs,
 // les suivants sont des "kinds" d'affichage riches stockés sur un type SQL de base
 // (voir resolveColumnChoice) et pilotent le rendu des cellules dans le tableau
@@ -38,6 +44,8 @@ const KIND_LABELS = {
   boolean: '☑ BOOLÉEN',
   date: '📅 DATE',
   url: '🔗 URL',
+  computed: 'Σ CALCULÉ',
+  formula: 'Σ FORMULE',
 };
 
 function columnTypeOptionsHtml() {
@@ -53,6 +61,51 @@ function resolveColumnChoice(value) {
     case 'URL': return { type: 'TEXT', kind: 'url' };
     default: return { type: value, kind: null };
   }
+}
+
+// évalue une règle de mise en forme conditionnelle (ou de filtre avancé) contre une ligne ;
+// pour une colonne liée à une autre table, compare aussi le libellé affiché (et pas
+// seulement l'id brut stocké), sinon une règle tapée avec le texte visible ne matcherait jamais
+function evaluateFormatRule(row, rule) {
+  const raw = row[rule.column];
+  const label = resolveRelationLabel(rule.column, raw);
+  const ruleVal = rule.value;
+  switch (rule.operator) {
+    case 'eq':
+      return String(raw ?? '') === String(ruleVal ?? '') || (label != null && String(label) === String(ruleVal ?? ''));
+    case 'neq':
+      return String(raw ?? '') !== String(ruleVal ?? '') && (label == null || String(label) !== String(ruleVal ?? ''));
+    case 'gt': return Number(raw) > Number(ruleVal);
+    case 'gte': return Number(raw) >= Number(ruleVal);
+    case 'lt': return Number(raw) < Number(ruleVal);
+    case 'lte': return Number(raw) <= Number(ruleVal);
+    case 'contains':
+      return String(raw ?? '').toLowerCase().includes(String(ruleVal ?? '').toLowerCase()) ||
+        (label != null && String(label).toLowerCase().includes(String(ruleVal ?? '').toLowerCase()));
+    default: return false;
+  }
+}
+
+const TOTAL_FN_LABELS = { sum: 'Σ Somme', avg: '⌀ Moyenne', count: '# Compte', min: '▼ Min', max: '▲ Max' };
+
+// calcule l'agrégat d'une colonne sur les lignes actuellement affichées (après recherche/tri)
+function computeColumnTotal(rows, col, fn) {
+  const values = rows.map(r => r[col]).filter(v => v !== null && v !== undefined && v !== '');
+  if (fn === 'count') return values.length;
+  if (values.length === 0) return '';
+
+  const numeric = values.map(Number).filter(n => !Number.isNaN(n));
+  if (fn === 'sum') return numeric.length ? numeric.reduce((a, b) => a + b, 0) : '';
+  if (fn === 'avg') return numeric.length ? (numeric.reduce((a, b) => a + b, 0) / numeric.length) : '';
+  if (fn === 'min') return numeric.length === values.length ? Math.min(...numeric) : values.slice().sort()[0];
+  if (fn === 'max') return numeric.length === values.length ? Math.max(...numeric) : values.slice().sort().slice(-1)[0];
+  return '';
+}
+
+function formatTotalValue(value) {
+  if (value === '' || value === null || value === undefined) return '';
+  if (typeof value === 'number' && !Number.isInteger(value)) return value.toFixed(2);
+  return String(value);
 }
 
 function showToast(message, type = 'info') {
@@ -108,6 +161,7 @@ let undoStack = [];
 let redoStack = [];
 const UNDO_LIMIT = 20;
 let viewMode = 'table'; // 'table' | 'graph'
+let advancedFilter = null; // { combinator: 'AND'|'OR', conditions: [{column, operator, value}] } | null
 
 function resetTableView() {
   viewMode = 'table';
@@ -117,11 +171,13 @@ function resetTableView() {
   selectedRowIds = new Set();
   undoStack = [];
   redoStack = [];
+  advancedFilter = null;
   const searchInput = document.getElementById('searchInput');
   if (searchInput) searchInput.value = '';
   updateUndoButton();
   updateRedoButton();
   updateSelectionUi();
+  updateAdvancedFilterBadge();
 }
 
 function updateUndoButton() {
@@ -173,6 +229,13 @@ function getDisplayRows() {
         return label != null && String(label).toLowerCase().includes(q);
       })
     );
+  }
+
+  if (advancedFilter && advancedFilter.conditions && advancedFilter.conditions.length > 0) {
+    rows = rows.filter(row => {
+      const results = advancedFilter.conditions.map(cond => evaluateFormatRule(row, cond));
+      return advancedFilter.combinator === 'OR' ? results.some(Boolean) : results.every(Boolean);
+    });
   }
 
   if (sortState.column) {
@@ -463,6 +526,12 @@ function renderTabs() {
   queryTab.textContent = '🖥 SQL';
   queryTab.addEventListener('click', openQueryModal);
   tabsEl.appendChild(queryTab);
+
+  const globalSearchTab = document.createElement('div');
+  globalSearchTab.className = 'tab tab-add';
+  globalSearchTab.textContent = '🔎 Recherche globale';
+  globalSearchTab.addEventListener('click', openGlobalSearchModal);
+  tabsEl.appendChild(globalSearchTab);
 }
 
 const btnViewTable = document.getElementById('btnViewTable');
@@ -474,6 +543,17 @@ function updateViewSwitcher() {
   btnViewGraph.disabled = disabled;
   btnViewTable.classList.toggle('active', viewMode === 'table');
   btnViewGraph.classList.toggle('active', viewMode === 'graph');
+
+  // le filtre avancé et les totaux n'ont de sens qu'en vue tableau, sur une table existante
+  const noTableContext = !currentTable || viewMode !== 'table';
+  const filterBtn = document.getElementById('btnAdvancedFilter');
+  if (filterBtn) filterBtn.disabled = noTableContext;
+  const totalsBtn = document.getElementById('btnTotalsConfig');
+  if (totalsBtn) totalsBtn.disabled = noTableContext;
+  const fileMenuBtn = document.getElementById('btnFileMenu');
+  if (fileMenuBtn) fileMenuBtn.disabled = noTableContext;
+  const addRowBtn = document.getElementById('btnAddRow');
+  if (addRowBtn) addRowBtn.disabled = noTableContext;
 }
 
 btnViewTable.addEventListener('click', async () => {
@@ -509,16 +589,19 @@ async function fetchTableReferences(dbId, tableName) {
   }
 }
 
-// agrège des références ligne-à-ligne (avec compteur) par table/colonne
+// agrège des références ligne-à-ligne (avec compteur) par table/colonne ;
+// précise si la relation est en cascade (ces lignes seront aussi supprimées)
 function formatRowReferenceLines(refs) {
   const byKey = {};
   refs.forEach(r => {
     const key = `${r.table}|${r.column}`;
-    byKey[key] = (byKey[key] || 0) + r.count;
+    byKey[key] = byKey[key] || { count: 0, cascade: r.cascade };
+    byKey[key].count += r.count;
   });
-  return Object.entries(byKey).map(([key, count]) => {
+  return Object.entries(byKey).map(([key, info]) => {
     const [table, column] = key.split('|');
-    return `• ${count} ligne(s) dans « ${table} » (colonne « ${column} »)`;
+    const suffix = info.cascade ? ' — seront aussi supprimée(s) (cascade activée)' : '';
+    return `• ${info.count} ligne(s) dans « ${table} » (colonne « ${column} »)${suffix}`;
   });
 }
 
@@ -547,11 +630,11 @@ async function saveCellValue(rowId, column, newValue, oldValue) {
 
 function renderContent() {
   const content = document.getElementById('content');
-  const toolbar = document.getElementById('contentToolbar');
   const pagination = document.getElementById('pagination');
+  document.getElementById('totalsBar').hidden = true;
 
   if (!currentDb) {
-    toolbar.classList.remove('visible');
+    setBottomBarPanelContext(false);
     pagination.innerHTML = '';
     content.innerHTML = `
       <div class="empty-state">
@@ -565,14 +648,14 @@ function renderContent() {
   }
 
   if (viewMode === 'graph') {
-    toolbar.classList.remove('visible');
+    setBottomBarPanelContext(false);
     pagination.innerHTML = '';
     renderGraphView(content);
     return;
   }
 
   if (!currentTable) {
-    toolbar.classList.remove('visible');
+    setBottomBarPanelContext(false);
     pagination.innerHTML = '';
     content.innerHTML = `
       <div class="empty-state">
@@ -585,7 +668,7 @@ function renderContent() {
     return;
   }
 
-  toolbar.classList.add('visible');
+  setBottomBarPanelContext(true);
 
   const { columns, columnTypes } = currentTableData;
   const allRows = currentTableData.rows || [];
@@ -618,12 +701,23 @@ function renderContent() {
   const pageRowIds = pageRows.map(r => String(r.id));
   const allPageSelected = pageRowIds.length > 0 && pageRowIds.every(id => selectedRowIds.has(id));
 
+  const pinnedCol = currentTableData.pinnedColumn;
+  const orderedColumns = (pinnedCol && columns.includes(pinnedCol))
+    ? [pinnedCol, ...columns.filter(c => c !== pinnedCol)]
+    : columns;
+
   let html = '<table><thead><tr>';
   html += `<th class="col-select"><input type="checkbox" id="selectAllCheckbox" ${allPageSelected ? 'checked' : ''}></th>`;
-  columns.forEach(col => {
+  orderedColumns.forEach(col => {
     const isSorted = sortState.column === col;
     const arrow = isSorted ? (sortState.dir === 'asc' ? ' ▲' : ' ▼') : '';
-    html += `<th class="sortable" data-column="${escapeHtml(col)}">${escapeHtml(col)}${arrow}</th>`;
+    const isPinned = col === pinnedCol;
+    html += `<th class="sortable${isPinned ? ' col-pinned' : ''}" data-column="${escapeHtml(col)}">
+      <div class="th-inner">
+        <span class="th-label">${escapeHtml(col)}${arrow}</span>
+        <button type="button" class="btn-pin-col${isPinned ? ' pinned' : ''}" data-column="${escapeHtml(col)}" title="${isPinned ? 'Désépingler cette colonne' : 'Épingler cette colonne (la garder visible en défilant)'}">📌</button>
+      </div>
+    </th>`;
   });
   html += '<th class="col-actions"></th>';
   html += '</tr></thead><tbody>';
@@ -631,46 +725,60 @@ function renderContent() {
   pageRows.forEach(row => {
     const rowId = String(row.id);
     const isSelected = selectedRowIds.has(rowId);
-    html += `<tr data-row-id="${escapeHtml(rowId)}"${isSelected ? ' class="row-selected"' : ''}>`;
+    const formatRules = currentTableData.conditionalFormats || [];
+    const matchedRowRule = formatRules.find(r => r.target === 'row' && evaluateFormatRule(row, r));
+    const rowStyleAttr = matchedRowRule ? ` style="background-color:${matchedRowRule.color}2e;"` : '';
+
+    html += `<tr data-row-id="${escapeHtml(rowId)}"${isSelected ? ' class="row-selected"' : ''}${rowStyleAttr}>`;
     html += `<td class="col-select"><input type="checkbox" class="row-select" ${isSelected ? 'checked' : ''}></td>`;
-    columns.forEach((col, i) => {
+
+    orderedColumns.forEach(col => {
       const cell = row[col] ?? '';
       const isId = col === 'id';
       const relation = (currentTableData.relations || []).find(r => r.column === col);
       const kind = currentTableData.columnKinds ? currentTableData.columnKinds[col] : null;
+      const pinnedCls = col === pinnedCol ? ' col-pinned' : '';
+      const cellRule = !matchedRowRule && formatRules.find(r => r.target === 'cell' && r.column === col && evaluateFormatRule(row, r));
+      const cellStyleAttr = cellRule ? ` style="background-color:${cellRule.color}45;"` : '';
+
+      if (kind === 'computed' || kind === 'formula') {
+        const displayVal = kind === 'formula' && typeof cell === 'number' && !Number.isInteger(cell) ? cell.toFixed(2) : cell;
+        html += `<td class="computed-cell${pinnedCls}" data-column="${escapeHtml(col)}" title="Champ calculé, en lecture seule"${cellStyleAttr}>${escapeHtml(displayVal)}</td>`;
+        return;
+      }
 
       if (relation) {
         const options = (currentTableData.relationOptions && currentTableData.relationOptions[col]) || [];
-        html += `<td class="rel-cell" data-column="${escapeHtml(col)}"><select class="rel-select">`;
+        html += `<td class="rel-cell${pinnedCls}" data-column="${escapeHtml(col)}"${cellStyleAttr}><select class="rel-select">`;
         html += `<option value="">—</option>`;
         options.forEach(opt => {
           const isSelected = cell !== '' && String(opt.id) === String(cell);
-          html += `<option value="${escapeHtml(opt.id)}"${isSelected ? ' selected' : ''}>${escapeHtml(opt.label)}</option>`;
+          html += `<option value="${escapeHtml(opt.id)}"${isSelected ? ' selected' : ''}>${escapeHtml(stripLeadingEmoji(opt.label))}</option>`;
         });
         html += `</select></td>`;
         return;
       }
 
       if (kind === 'boolean') {
-        html += `<td class="bool-cell" data-column="${escapeHtml(col)}"><input type="checkbox" class="bool-checkbox" ${cell ? 'checked' : ''}></td>`;
+        html += `<td class="bool-cell${pinnedCls}" data-column="${escapeHtml(col)}"${cellStyleAttr}><input type="checkbox" class="bool-checkbox" ${cell ? 'checked' : ''}></td>`;
         return;
       }
 
       if (kind === 'date') {
-        html += `<td class="date-cell" data-column="${escapeHtml(col)}"><input type="date" class="date-input" value="${escapeHtml(cell)}"></td>`;
+        html += `<td class="date-cell${pinnedCls}" data-column="${escapeHtml(col)}"${cellStyleAttr}><input type="date" class="date-input" value="${escapeHtml(cell)}"></td>`;
         return;
       }
 
       if (kind === 'color') {
         const hex = /^#[0-9a-fA-F]{6}$/.test(cell) ? cell : '#000000';
-        html += `<td class="color-cell" data-column="${escapeHtml(col)}"><input type="color" class="color-swatch" value="${hex}" title="Cliquer pour changer la couleur (code hexa saisissable dans la fenêtre système)"></td>`;
+        html += `<td class="color-cell${pinnedCls}" data-column="${escapeHtml(col)}"${cellStyleAttr}><input type="color" class="color-swatch" value="${hex}" title="Cliquer pour changer la couleur (code hexa saisissable dans la fenêtre système)"></td>`;
         return;
       }
 
       if (kind === 'image') {
         const safeSrc = cell ? ` src="${escapeHtml(cell)}"` : '';
         const hiddenAttr = cell ? '' : ' style="visibility:hidden"';
-        html += `<td class="image-cell" data-column="${escapeHtml(col)}">
+        html += `<td class="image-cell${pinnedCls}" data-column="${escapeHtml(col)}"${cellStyleAttr}>
           <label class="image-thumb-wrap" title="Cliquer pour importer une image">
             <img class="image-thumb"${safeSrc}${hiddenAttr} alt="" onerror="this.style.visibility='hidden'" onload="this.style.visibility='visible'">
             <input type="file" accept="image/*" class="image-file-input" hidden>
@@ -681,17 +789,22 @@ function renderContent() {
 
       const isNum = !isId && typeof row[col] === 'number';
       const kindCls = kind === 'url' ? ' cell-url' : '';
-      const cls = isId ? 'col-id' : `editable ${isNum ? 'cell-num' : (i === 0 ? 'cell-dim' : '')}${kindCls}`;
+      const cls = (isId ? 'col-id' : `editable ${isNum ? 'cell-num' : ''}${kindCls}`) + pinnedCls;
       const editableAttr = isId ? '' : 'contenteditable="true"';
-      html += `<td class="${cls}" data-column="${escapeHtml(col)}" ${editableAttr}>${escapeHtml(cell)}</td>`;
+      html += `<td class="${cls}" data-column="${escapeHtml(col)}" ${editableAttr}${cellStyleAttr}>${escapeHtml(cell)}</td>`;
     });
-    html += `<td class="col-actions"><button class="btn-delete-row" title="Supprimer cette ligne">🗑</button></td>`;
+    html += `<td class="col-actions">
+      <button class="btn-expand-row" title="Voir le détail de la ligne">⤢</button>
+      <button class="btn-duplicate-row" title="Dupliquer cette ligne">⧉</button>
+      <button class="btn-delete-row" title="Supprimer cette ligne">🗑</button>
+    </td>`;
     html += '</tr>';
   });
   html += '</tbody></table>';
   content.innerHTML = html;
 
   renderPagination(totalPages, filteredRows.length);
+  renderTotalsBar(filteredRows);
 
   content.querySelectorAll('thead th.sortable').forEach(th => {
     th.addEventListener('click', () => {
@@ -704,6 +817,29 @@ function renderContent() {
       }
       currentPage = 1;
       renderContent();
+    });
+  });
+
+  content.querySelectorAll('.btn-pin-col').forEach(btn => {
+    btn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      const col = btn.dataset.column;
+      const newPinned = col === pinnedCol ? null : col;
+      try {
+        const res = await fetch(`/api/${currentDb.id}/${currentTable.name}/pinned-column`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ column: newPinned })
+        });
+        if (!res.ok) {
+          const data = await res.json().catch(() => ({}));
+          throw new Error(data.error || 'Échec de l\'épinglage');
+        }
+        currentTableData.pinnedColumn = newPinned;
+        renderContent();
+      } catch (err) {
+        showToast(err.message, 'error');
+      }
     });
   });
 
@@ -738,8 +874,11 @@ function renderContent() {
     btn.addEventListener('click', async () => {
       const rowId = btn.closest('tr').dataset.rowId;
       const refs = await fetchRowReferences(currentDb.id, currentTable.name, rowId);
+      const closing = refs.some(r => !r.cascade)
+        ? 'La supprimer quand même laissera les liaisons non-cascade orphelines. Continuer ?'
+        : 'Continuer ?';
       const message = refs.length > 0
-        ? `Cette ligne est référencée ailleurs :\n${formatRowReferenceLines(refs).join('\n')}\n\nLa supprimer quand même laissera ces liaisons orphelines. Continuer ?`
+        ? `Cette ligne est référencée ailleurs :\n${formatRowReferenceLines(refs).join('\n')}\n\n${closing}`
         : 'Supprimer définitivement cette ligne ?';
       const confirmed = await showConfirm(message, refs.length > 0 ? '⚠️ Ligne référencée ailleurs' : 'Supprimer la ligne');
       if (!confirmed) return;
@@ -889,6 +1028,44 @@ function renderContent() {
       reader.readAsDataURL(file);
     });
   });
+
+  content.querySelectorAll('.btn-duplicate-row').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const rowId = btn.closest('tr').dataset.rowId;
+      const sourceRow = (currentTableData.rows || []).find(r => String(r.id) === String(rowId));
+      if (!sourceRow) return;
+
+      const data = {};
+      currentTableData.columns.forEach(col => {
+        if (col === 'id') return;
+        if (currentTableData.columnKinds && ['computed', 'formula'].includes(currentTableData.columnKinds[col])) return;
+        data[col] = sourceRow[col];
+      });
+
+      try {
+        const res = await fetch(`/api/${currentDb.id}/${currentTable.name}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(data)
+        });
+        const result = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(result.error || `Erreur inconnue (${res.status})`);
+        await loadDatabases();
+        await loadTableData();
+        renderAll();
+        showToast('Ligne dupliquée.', 'success');
+      } catch (err) {
+        showToast(err.message, 'error');
+      }
+    });
+  });
+
+  content.querySelectorAll('.btn-expand-row').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const rowId = btn.closest('tr').dataset.rowId;
+      openRowDetailModal(rowId);
+    });
+  });
 }
 
 function renderPagination(totalPages, totalRows) {
@@ -910,6 +1087,60 @@ function renderPagination(totalPages, totalRows) {
   document.getElementById('btnNextPage').addEventListener('click', () => {
     if (currentPage < totalPages) { currentPage++; renderContent(); }
   });
+}
+
+// affiche les totaux configurés dans la barre fixe du bas (jamais dans le tableau
+// lui-même : le sticky y a causé des bugs d'affichage à répétition). La fonction
+// d'agrégat de chaque total est modifiable directement ici, sans rouvrir la modale.
+function renderTotalsBar(rows) {
+  const bar = document.getElementById('totalsBar');
+  const totalsConfig = currentTableData.totals || {};
+  const entries = Object.entries(totalsConfig);
+
+  if (entries.length === 0) {
+    bar.hidden = true;
+    return;
+  }
+
+  bar.hidden = false;
+  bar.innerHTML = entries.map(([col, fn]) => {
+    const value = formatTotalValue(computeColumnTotal(rows, col, fn));
+    return `<span class="totals-bar-chip">
+      <select class="totals-bar-fn-select" data-column="${escapeHtml(col)}">
+        ${Object.entries(TOTAL_FN_LABELS).map(([key, label]) =>
+          `<option value="${key}"${fn === key ? ' selected' : ''}>${escapeHtml(label)}</option>`
+        ).join('')}
+      </select>
+      ${escapeHtml(col)} : <strong>${escapeHtml(value)}</strong>
+    </span>`;
+  }).join('');
+
+  bar.querySelectorAll('.totals-bar-fn-select').forEach(select => {
+    select.addEventListener('change', async () => {
+      try {
+        await saveColumnTotal(select.dataset.column, select.value);
+        renderTotalsBar(getDisplayRows());
+      } catch (err) {
+        showToast(err.message, 'error');
+      }
+    });
+  });
+}
+
+// enregistre la fonction d'agrégat d'une colonne (appelé depuis la barre ou la modale) ;
+// lève en cas d'échec pour laisser chaque appelant décider de son propre retour visuel
+async function saveColumnTotal(col, fn) {
+  const res = await fetch(`/api/${currentDb.id}/${currentTable.name}/columns/${col}/total`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ fn: fn || null })
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error || "Échec de l'enregistrement");
+  }
+  currentTableData.totals = currentTableData.totals || {};
+  if (fn) currentTableData.totals[col] = fn; else delete currentTableData.totals[col];
 }
 
 function renderAll() {
@@ -937,8 +1168,8 @@ async function loadGraphData(dbId) {
     fetch(`/api/${dbId}/relations`).then(r => r.ok ? r.json() : []),
     Promise.all(tables.map(t =>
       fetch(`/api/${dbId}/${t.name}`)
-        .then(r => r.ok ? r.json() : { columns: [], columnTypes: {} })
-        .then(data => [t.name, { columns: data.columns || [], columnTypes: data.columnTypes || {} }])
+        .then(r => r.ok ? r.json() : { columns: [], columnTypes: {}, columnKinds: {} })
+        .then(data => [t.name, { columns: data.columns || [], columnTypes: data.columnTypes || {}, columnKinds: data.columnKinds || {} }])
     )),
   ]);
   graphCache = { dbId, relations, schemas: Object.fromEntries(schemaEntries) };
@@ -1451,14 +1682,24 @@ function renderGraphView(content) {
     node.style.top = pos.y + 'px';
 
     const colsHtml = schema.columns.map(col => {
-      const type = (schema.columnTypes && schema.columnTypes[col]) || '';
+      const kind = (schema.columnKinds && schema.columnKinds[col]) || null;
+      const isComputed = kind === 'computed' || kind === 'formula';
+      const type = isComputed ? (KIND_LABELS[kind] || '') : ((schema.columnTypes && schema.columnTypes[col]) || '');
       const isId = col === 'id';
+      // les champs calculés/formule ne sont pas de vraies colonnes SQL : ils ne peuvent
+      // ni être la source ni la cible d'une liaison (le backend n'a rien à y accrocher)
+      const inConnector = isComputed
+        ? '<span class="graph-connector-placeholder"></span>'
+        : `<span class="graph-connector graph-connector-in" data-table="${escapeHtml(table.name)}" data-column="${escapeHtml(col)}" title="Cible de liaison : ${escapeHtml(col)}"></span>`;
+      const outConnector = (isId || isComputed)
+        ? '<span class="graph-connector-placeholder"></span>'
+        : `<span class="graph-connector graph-connector-out" data-table="${escapeHtml(table.name)}" data-column="${escapeHtml(col)}" title="Tirer pour relier « ${escapeHtml(col)} »"></span>`;
       return `
-        <div class="graph-col-row">
-          <span class="graph-connector graph-connector-in" data-table="${escapeHtml(table.name)}" data-column="${escapeHtml(col)}" title="Cible de liaison : ${escapeHtml(col)}"></span>
+        <div class="graph-col-row${isComputed ? ' graph-col-computed' : ''}">
+          ${inConnector}
           <span class="graph-col-name">${escapeHtml(col)}</span>
           <span class="graph-col-type">${escapeHtml(type)}</span>
-          ${isId ? '<span class="graph-connector-placeholder"></span>' : `<span class="graph-connector graph-connector-out" data-table="${escapeHtml(table.name)}" data-column="${escapeHtml(col)}" title="Tirer pour relier « ${escapeHtml(col)} »"></span>`}
+          ${outConnector}
         </div>`;
     }).join('');
 
@@ -1697,45 +1938,50 @@ formNewTable.addEventListener('submit', async (e) => {
   }
 });
 
-const modalNewRow = document.getElementById('modalNewRow');
 const formNewRow = document.getElementById('formNewRow');
 const errorNewRow = document.getElementById('errorNewRow');
 const rowFieldsList = document.getElementById('rowFieldsList');
 
-function openNewRowModal() {
+// remplit le panneau "+ Ligne" du bas avec un champ par colonne (widgets riches
+// identiques à la grille : relation, couleur, image...), pas de fenêtre séparée
+function populateRowFieldsForm() {
   if (!currentTable) return;
   errorNewRow.textContent = '';
   rowFieldsList.innerHTML = '';
 
   currentTableData.columns
-    .filter(col => col !== 'id')
+    .filter(col => col !== 'id' && (!currentTableData.columnKinds || !['computed', 'formula'].includes(currentTableData.columnKinds[col])))
     .forEach(col => {
       const relation = (currentTableData.relations || []).find(r => r.column === col);
       const kind = currentTableData.columnKinds ? currentTableData.columnKinds[col] : null;
+      const validation = (currentTableData.columnValidation && currentTableData.columnValidation[col]) || null;
+      const defaultVal = validation && validation.defaultValue != null ? validation.defaultValue : '';
+      const labelText = escapeHtml(col) + (validation && validation.required ? ' <span class="required-mark">*</span>' : '');
       const label = document.createElement('label');
 
       if (relation) {
         const options = (currentTableData.relationOptions && currentTableData.relationOptions[col]) || [];
         let selectHtml = `<select class="row-field" data-column="${escapeHtml(col)}"><option value="">—</option>`;
         options.forEach(opt => {
-          selectHtml += `<option value="${escapeHtml(opt.id)}">${escapeHtml(opt.label)}</option>`;
+          const isDefault = defaultVal !== '' && String(opt.id) === String(defaultVal);
+          selectHtml += `<option value="${escapeHtml(opt.id)}"${isDefault ? ' selected' : ''}>${escapeHtml(stripLeadingEmoji(opt.label))}</option>`;
         });
         selectHtml += `</select>`;
-        label.innerHTML = `${escapeHtml(col)}${selectHtml}`;
+        label.innerHTML = `${labelText}${selectHtml}`;
       } else if (kind === 'boolean') {
-        label.innerHTML = `${escapeHtml(col)}<input type="checkbox" class="row-field" data-column="${escapeHtml(col)}">`;
+        label.innerHTML = `${labelText}<input type="checkbox" class="row-field" data-column="${escapeHtml(col)}"${defaultVal ? ' checked' : ''}>`;
       } else if (kind === 'date') {
-        label.innerHTML = `${escapeHtml(col)}<input type="date" class="row-field" data-column="${escapeHtml(col)}">`;
+        label.innerHTML = `${labelText}<input type="date" class="row-field" data-column="${escapeHtml(col)}" value="${escapeHtml(defaultVal)}">`;
       } else if (kind === 'url') {
-        label.innerHTML = `${escapeHtml(col)}<input type="url" class="row-field" data-column="${escapeHtml(col)}" placeholder="https://...">`;
+        label.innerHTML = `${labelText}<input type="url" class="row-field" data-column="${escapeHtml(col)}" placeholder="https://..." value="${escapeHtml(defaultVal)}">`;
       } else if (kind === 'color') {
-        label.innerHTML = `${escapeHtml(col)}
+        label.innerHTML = `${labelText}
           <div class="row-field-pair row-field-color">
-            <input type="color" class="row-field-color-swatch" value="#000000">
-            <input type="text" class="row-field" data-column="${escapeHtml(col)}" placeholder="#rrggbb">
+            <input type="color" class="row-field-color-swatch" value="${/^#[0-9a-fA-F]{6}$/.test(defaultVal) ? defaultVal : '#000000'}">
+            <input type="text" class="row-field" data-column="${escapeHtml(col)}" placeholder="#rrggbb" value="${escapeHtml(defaultVal)}">
           </div>`;
       } else if (kind === 'image') {
-        label.innerHTML = `${escapeHtml(col)}
+        label.innerHTML = `${labelText}
           <div class="row-field-pair row-field-image">
             <input type="text" class="row-field" data-column="${escapeHtml(col)}" placeholder="URL ou importer...">
             <label class="image-upload-btn" title="Importer une image">📁<input type="file" accept="image/*" class="row-field-image-file" hidden></label>
@@ -1744,7 +1990,7 @@ function openNewRowModal() {
         const type = currentTableData.columnTypes ? currentTableData.columnTypes[col] : undefined;
         const inputType = (type === 'INTEGER' || type === 'REAL') ? 'number' : 'text';
         const stepAttr = type === 'REAL' ? ' step="any"' : '';
-        label.innerHTML = `${escapeHtml(col)}<input type="${inputType}" class="row-field" data-column="${escapeHtml(col)}"${stepAttr}>`;
+        label.innerHTML = `${labelText}<input type="${inputType}" class="row-field" data-column="${escapeHtml(col)}"${stepAttr} value="${escapeHtml(defaultVal)}">`;
       }
 
       rowFieldsList.appendChild(label);
@@ -1766,20 +2012,11 @@ function openNewRowModal() {
     });
   });
 
-  modalNewRow.classList.add('open');
   const firstInput = rowFieldsList.querySelector('input');
   if (firstInput) firstInput.focus();
 }
 
-function closeNewRowModal() {
-  modalNewRow.classList.remove('open');
-}
-
-document.getElementById('btnAddRow').addEventListener('click', openNewRowModal);
-document.getElementById('cancelNewRow').addEventListener('click', closeNewRowModal);
-modalNewRow.addEventListener('click', (e) => {
-  if (e.target === modalNewRow) closeNewRowModal();
-});
+document.getElementById('btnAddRow').addEventListener('click', () => toggleBottomBarPanel('row', 180));
 
 formNewRow.addEventListener('submit', async (e) => {
   e.preventDefault();
@@ -1803,14 +2040,232 @@ formNewRow.addEventListener('submit', async (e) => {
     const result = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(result.error || `Erreur inconnue (${res.status})`);
 
-    closeNewRowModal();
     await loadDatabases();
     await loadTableData();
     renderAll();
+    populateRowFieldsForm(); // vide/réinitialise les champs pour ajouter une autre ligne
+    showToast('Ligne ajoutée.', 'success');
   } catch (err) {
     errorNewRow.textContent = err.message;
   }
 });
+
+// =========================================================================
+// MODALE : détail d'une ligne — toutes les colonnes empilées, éditables
+// avec les mêmes widgets riches que la grille (relation, couleur, image...)
+// =========================================================================
+
+const modalRowDetail = document.getElementById('modalRowDetail');
+const rowDetailFields = document.getElementById('rowDetailFields');
+
+function closeRowDetailModal() {
+  modalRowDetail.classList.remove('open');
+}
+
+document.getElementById('closeRowDetail').addEventListener('click', async () => {
+  closeRowDetailModal();
+  await loadTableData();
+  renderAll();
+});
+modalRowDetail.addEventListener('click', async (e) => {
+  if (e.target !== modalRowDetail) return;
+  closeRowDetailModal();
+  await loadTableData();
+  renderAll();
+});
+
+function openRowDetailModal(rowId) {
+  if (!currentTable) return;
+  const row = (currentTableData.rows || []).find(r => String(r.id) === String(rowId));
+  if (!row) return;
+
+  document.getElementById('rowDetailTitle').textContent = `${currentTable.name} — ligne #${rowId}`;
+  rowDetailFields.innerHTML = '';
+
+  currentTableData.columns.forEach(col => {
+    const value = row[col] ?? '';
+    const isId = col === 'id';
+    const relation = (currentTableData.relations || []).find(r => r.column === col);
+    const kind = currentTableData.columnKinds ? currentTableData.columnKinds[col] : null;
+
+    const field = document.createElement('div');
+    field.className = 'row-detail-field';
+    const label = document.createElement('div');
+    label.className = 'row-detail-label';
+    label.textContent = col;
+    field.appendChild(label);
+
+    const readonly = (text) => {
+      const div = document.createElement('div');
+      div.className = 'row-detail-value row-detail-readonly';
+      div.textContent = text === '' || text == null ? '—' : text;
+      field.appendChild(div);
+    };
+
+    const revert = (el, prop, original) => { el[prop] = original; };
+
+    if (isId || kind === 'computed' || kind === 'formula') {
+      readonly(value);
+    } else if (relation) {
+      const options = (currentTableData.relationOptions && currentTableData.relationOptions[col]) || [];
+      const select = document.createElement('select');
+      select.className = 'row-detail-input';
+      select.innerHTML = `<option value="">—</option>` + options.map(opt =>
+        `<option value="${escapeHtml(opt.id)}"${String(opt.id) === String(value) ? ' selected' : ''}>${escapeHtml(stripLeadingEmoji(opt.label))}</option>`
+      ).join('');
+      const original = select.value;
+      select.addEventListener('change', async () => {
+        try {
+          await saveCellValue(rowId, col, select.value, original);
+          row[col] = select.value;
+        } catch (err) {
+          showToast(err.message, 'error');
+          revert(select, 'value', original);
+        }
+      });
+      field.appendChild(select);
+    } else if (kind === 'boolean') {
+      const input = document.createElement('input');
+      input.type = 'checkbox';
+      input.className = 'row-detail-checkbox';
+      input.checked = !!value;
+      input.addEventListener('change', async () => {
+        const newValue = input.checked ? 1 : 0;
+        try {
+          await saveCellValue(rowId, col, newValue, input.checked ? 0 : 1);
+          row[col] = newValue;
+        } catch (err) {
+          showToast(err.message, 'error');
+          input.checked = !input.checked;
+        }
+      });
+      field.appendChild(input);
+    } else if (kind === 'date') {
+      const input = document.createElement('input');
+      input.type = 'date';
+      input.className = 'row-detail-input';
+      input.value = value;
+      const original = value;
+      input.addEventListener('change', async () => {
+        try {
+          await saveCellValue(rowId, col, input.value, original);
+          row[col] = input.value;
+        } catch (err) {
+          showToast(err.message, 'error');
+          revert(input, 'value', original);
+        }
+      });
+      field.appendChild(input);
+    } else if (kind === 'color') {
+      const wrap = document.createElement('div');
+      wrap.className = 'row-detail-pair';
+      const swatch = document.createElement('input');
+      swatch.type = 'color';
+      swatch.className = 'row-field-color-swatch';
+      swatch.value = /^#[0-9a-fA-F]{6}$/.test(value) ? value : '#000000';
+      const text = document.createElement('input');
+      text.type = 'text';
+      text.className = 'row-detail-input';
+      text.value = value;
+      text.placeholder = '#rrggbb';
+      const original = value;
+      const commit = async (newValue) => {
+        try {
+          await saveCellValue(rowId, col, newValue, original);
+          row[col] = newValue;
+        } catch (err) {
+          showToast(err.message, 'error');
+          revert(text, 'value', original);
+          if (/^#[0-9a-fA-F]{6}$/.test(original)) revert(swatch, 'value', original);
+        }
+      };
+      swatch.addEventListener('input', () => { text.value = swatch.value; });
+      swatch.addEventListener('change', () => commit(swatch.value));
+      text.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); text.blur(); } });
+      text.addEventListener('blur', () => {
+        if (text.value === original) return;
+        if (/^#[0-9a-fA-F]{6}$/i.test(text.value)) swatch.value = text.value;
+        commit(text.value);
+      });
+      wrap.appendChild(swatch);
+      wrap.appendChild(text);
+      field.appendChild(wrap);
+    } else if (kind === 'image') {
+      const wrap = document.createElement('div');
+      wrap.className = 'row-detail-pair';
+      const img = document.createElement('img');
+      img.className = 'row-detail-image-preview';
+      if (value) img.src = value; else img.style.visibility = 'hidden';
+      const uploadLabel = document.createElement('label');
+      uploadLabel.className = 'image-upload-btn';
+      uploadLabel.title = 'Importer une image';
+      uploadLabel.textContent = '📁';
+      const fileInput = document.createElement('input');
+      fileInput.type = 'file';
+      fileInput.accept = 'image/*';
+      fileInput.hidden = true;
+      const original = value;
+      fileInput.addEventListener('change', () => {
+        const file = fileInput.files[0];
+        if (!file) return;
+        const reader = new FileReader();
+        reader.onload = async () => {
+          img.src = reader.result;
+          img.style.visibility = 'visible';
+          try {
+            await saveCellValue(rowId, col, reader.result, original);
+            row[col] = reader.result;
+          } catch (err) {
+            showToast(err.message, 'error');
+            img.src = original;
+            if (!original) img.style.visibility = 'hidden';
+          }
+        };
+        reader.readAsDataURL(file);
+      });
+      uploadLabel.appendChild(fileInput);
+      wrap.appendChild(img);
+      wrap.appendChild(uploadLabel);
+      field.appendChild(wrap);
+    } else {
+      const type = currentTableData.columnTypes ? currentTableData.columnTypes[col] : undefined;
+      const isLong = typeof value === 'string' && value.length > 60;
+      const input = document.createElement(isLong ? 'textarea' : 'input');
+      if (!isLong) input.type = (type === 'INTEGER' || type === 'REAL') ? 'number' : 'text';
+      input.className = 'row-detail-input' + (kind === 'url' ? ' cell-url' : '');
+      input.value = value;
+      const original = value;
+      input.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' && !isLong) { e.preventDefault(); input.blur(); }
+      });
+      input.addEventListener('blur', async () => {
+        if (input.value === String(original)) return;
+        if (type === 'INTEGER' && input.value !== '' && !/^-?\d+$/.test(input.value)) {
+          showToast(`La colonne « ${col} » attend un nombre entier.`, 'error');
+          revert(input, 'value', original);
+          return;
+        }
+        if (type === 'REAL' && input.value !== '' && !/^-?\d+(\.\d+)?$/.test(input.value)) {
+          showToast(`La colonne « ${col} » attend un nombre décimal.`, 'error');
+          revert(input, 'value', original);
+          return;
+        }
+        try {
+          await saveCellValue(rowId, col, input.value, original);
+          row[col] = input.value;
+        } catch (err) {
+          showToast(err.message, 'error');
+          revert(input, 'value', original);
+        }
+      });
+      field.appendChild(input);
+    }
+
+    rowDetailFields.appendChild(field);
+  });
+
+  modalRowDetail.classList.add('open');
+}
 
 function parseCsv(text) {
   const lines = text.split(/\r?\n/).filter(l => l.trim() !== '');
@@ -1879,7 +2334,10 @@ document.getElementById('csvFileInput').addEventListener('change', async (e) => 
     const { headers, rows } = parseCsv(text);
 
     // ne garde que les colonnes du CSV qui correspondent à des colonnes existantes de la table
-    const validColumns = currentTableData.columns.filter(c => c !== 'id');
+    // (les champs calculés ne sont jamais des cibles d'import, ce ne sont pas de vraies colonnes)
+    const validColumns = currentTableData.columns.filter(c =>
+      c !== 'id' && (!currentTableData.columnKinds || !['computed','formula'].includes(currentTableData.columnKinds[c]))
+    );
     const matchedHeaders = headers.filter(h => validColumns.includes(h));
 
     if (matchedHeaders.length === 0) {
@@ -1917,223 +2375,83 @@ document.getElementById('csvFileInput').addEventListener('change', async (e) => 
   }
 });
 
-const modalEditColumns = document.getElementById('modalEditColumns');
-const editColumnsList = document.getElementById('editColumnsList');
-const errorEditColumns = document.getElementById('errorEditColumns');
-const formAddColumn = document.getElementById('formAddColumn');
+// =========================================================================
+// PANNEAU "TOTAUX" DE LA BARRE DU BAS — bascule le contenu du panneau du bas
+// (comme les onglets Problems/Output de VS Code), pas une fenêtre à part
+// =========================================================================
 
-async function fetchTableColumns(dbId, tableName) {
-  const res = await fetch(`/api/${dbId}/${tableName}`);
-  if (!res.ok) return [];
-  const data = await res.json();
-  return data.columns || [];
-}
+function renderTotalsConfigList() {
+  const container = document.getElementById('totalsConfigList');
+  const cols = currentTableData.columns.filter(c => c !== 'id');
+  const totalsConfig = currentTableData.totals || {};
 
-function renderEditColumnsList() {
-  editColumnsList.innerHTML = '';
-
-  currentTableData.columns.filter(c => c !== 'id').forEach(col => {
-    const type = currentTableData.columnTypes ? currentTableData.columnTypes[col] : 'TEXT';
-    const kind = currentTableData.columnKinds ? currentTableData.columnKinds[col] : null;
-    const typeLabel = kind && KIND_LABELS[kind] ? KIND_LABELS[kind] : type;
-    const relation = (currentTableData.relations || []).find(r => r.column === col);
-
-    const block = document.createElement('div');
-    block.className = 'edit-column-block';
-
-    const row = document.createElement('div');
-    row.className = 'edit-column-row';
-    row.innerHTML = `
-      <input type="text" class="edit-col-name" value="${escapeHtml(col)}">
-      <span class="edit-col-type">${escapeHtml(typeLabel)}</span>
-      <button type="button" class="btn-link-col${relation ? ' linked' : ''}" title="${relation ? `Lié à ${relation.refTable}.${relation.refColumn}` : 'Lier à une autre table'}">🔗</button>
-      <button type="button" class="btn-save-col" title="Renommer">✓</button>
-      <button type="button" class="btn-remove-col" title="Supprimer la colonne">×</button>
-    `;
-
-    const relPanel = document.createElement('div');
-    relPanel.className = 'rel-panel';
-    relPanel.hidden = !relation;
-    const otherTables = (currentDb.tables || []).map(t => t.name).filter(n => n !== currentTable.name);
-    relPanel.innerHTML = `
-      <select class="rel-ref-table">
-        <option value="">— Aucune liaison —</option>
-        ${otherTables.map(t => `<option value="${escapeHtml(t)}"${relation && relation.refTable === t ? ' selected' : ''}>${escapeHtml(t)}</option>`).join('')}
+  container.innerHTML = cols.map(col => `
+    <div class="totals-config-row">
+      <span class="totals-config-name">${escapeHtml(col)}</span>
+      <select class="totals-config-select" data-column="${escapeHtml(col)}">
+        <option value="">—</option>
+        ${Object.entries(TOTAL_FN_LABELS).map(([key, label]) =>
+          `<option value="${key}"${totalsConfig[col] === key ? ' selected' : ''}>${escapeHtml(label)}</option>`
+        ).join('')}
       </select>
-      <select class="rel-ref-column"></select>
-      <select class="rel-ref-display"></select>
-      <button type="button" class="btn-save-rel" title="Enregistrer la liaison">✓</button>
-    `;
+    </div>
+  `).join('');
 
-    async function populateRefSelects(refTable) {
-      const colSelect = relPanel.querySelector('.rel-ref-column');
-      const dispSelect = relPanel.querySelector('.rel-ref-display');
-      colSelect.innerHTML = '';
-      dispSelect.innerHTML = '';
-      if (!refTable) return;
-
-      const refCols = await fetchTableColumns(currentDb.id, refTable);
-      refCols.forEach(c => {
-        const opt1 = document.createElement('option');
-        opt1.value = c;
-        opt1.textContent = c;
-        colSelect.appendChild(opt1);
-
-        const opt2 = document.createElement('option');
-        opt2.value = c;
-        opt2.textContent = c;
-        dispSelect.appendChild(opt2);
-      });
-
-      if (relation && relation.refTable === refTable) {
-        colSelect.value = relation.refColumn;
-        dispSelect.value = relation.refDisplay;
-      } else {
-        colSelect.value = 'id';
-        const firstNonId = refCols.find(c => c !== 'id');
-        if (firstNonId) dispSelect.value = firstNonId;
-      }
-    }
-
-    relPanel.querySelector('.rel-ref-table').addEventListener('change', (e) => {
-      populateRefSelects(e.target.value);
-    });
-
-    if (relation) populateRefSelects(relation.refTable);
-
-    relPanel.querySelector('.btn-save-rel').addEventListener('click', async () => {
-      const refTable = relPanel.querySelector('.rel-ref-table').value;
-      errorEditColumns.textContent = '';
-
+  container.querySelectorAll('.totals-config-select').forEach(select => {
+    select.addEventListener('change', async () => {
+      const col = select.dataset.column;
+      const fn = select.value;
+      const original = totalsConfig[col] || '';
       try {
-        if (!refTable) {
-          if (relation) {
-            const res = await fetch(`/api/${currentDb.id}/${currentTable.name}/columns/${col}/relation`, { method: 'DELETE' });
-            if (!res.ok) {
-              const data = await res.json().catch(() => ({}));
-              throw new Error(data.error || 'Échec de la suppression de la liaison');
-            }
-          }
-        } else {
-          const refColumn = relPanel.querySelector('.rel-ref-column').value;
-          const refDisplay = relPanel.querySelector('.rel-ref-display').value;
-          const res = await fetch(`/api/${currentDb.id}/${currentTable.name}/columns/${col}/relation`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ refTable, refColumn, refDisplay })
-          });
-          if (!res.ok) {
-            const data = await res.json().catch(() => ({}));
-            throw new Error(data.error || 'Échec de la liaison');
-          }
-        }
-        await loadTableData();
-        renderEditColumnsList();
-        renderContent();
+        await saveColumnTotal(col, fn);
+        renderTotalsBar(getDisplayRows());
+        showToast(fn ? `Total activé pour « ${col} ».` : `Total retiré pour « ${col} ».`, 'success');
       } catch (err) {
-        errorEditColumns.textContent = err.message;
+        showToast(err.message, 'error');
+        select.value = original;
       }
     });
-
-    row.querySelector('.btn-link-col').addEventListener('click', () => {
-      relPanel.hidden = !relPanel.hidden;
-    });
-
-    row.querySelector('.btn-save-col').addEventListener('click', async () => {
-      const input = row.querySelector('.edit-col-name');
-      const newName = input.value.trim();
-      if (!newName || newName === col) return;
-
-      try {
-        const res = await fetch(`/api/${currentDb.id}/${currentTable.name}/columns/${col}`, {
-          method: 'PATCH',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ newName })
-        });
-        if (!res.ok) {
-          const data = await res.json().catch(() => ({}));
-          throw new Error(data.error || 'Échec du renommage');
-        }
-        errorEditColumns.textContent = '';
-        await loadTableData();
-        renderEditColumnsList();
-        renderContent();
-      } catch (err) {
-        errorEditColumns.textContent = err.message;
-      }
-    });
-
-    row.querySelector('.btn-remove-col').addEventListener('click', async () => {
-      const confirmed = await showConfirm(`Supprimer définitivement la colonne « ${col} » et ses données ?`, 'Supprimer la colonne');
-      if (!confirmed) return;
-
-      try {
-        const res = await fetch(`/api/${currentDb.id}/${currentTable.name}/columns/${col}`, { method: 'DELETE' });
-        if (!res.ok) {
-          const data = await res.json().catch(() => ({}));
-          throw new Error(data.error || 'Échec de la suppression');
-        }
-        errorEditColumns.textContent = '';
-        await loadTableData();
-        renderEditColumnsList();
-        renderContent();
-      } catch (err) {
-        errorEditColumns.textContent = err.message;
-      }
-    });
-
-    block.appendChild(row);
-    block.appendChild(relPanel);
-    editColumnsList.appendChild(block);
   });
 }
 
-document.getElementById('inputNewColType').innerHTML = columnTypeOptionsHtml();
+// null = vue "actions" par défaut ; sinon 'totals' | 'row' | 'filters' | 'columns' —
+// une seule vue à la fois dans le panneau du bas, comme changer d'onglet VS Code
+let bottomBarActivePanel = null;
 
-function openEditColumnsModal() {
+function setBottomBarActivePanel(panel) {
+  bottomBarActivePanel = panel;
+  document.getElementById('btnTotalsConfig').classList.toggle('active', panel === 'totals');
+  document.getElementById('btnAddRow').classList.toggle('active', panel === 'row');
+  document.getElementById('btnAdvancedFilter').classList.toggle('active', panel === 'filters');
+
+  document.getElementById('bottomBarPanelActions').classList.toggle('active', panel === null);
+  document.getElementById('bottomBarPanelTotals').classList.toggle('active', panel === 'totals');
+  document.getElementById('bottomBarPanelRow').classList.toggle('active', panel === 'row');
+  document.getElementById('bottomBarPanelFilters').classList.toggle('active', panel === 'filters');
+
+  if (panel === 'totals') renderTotalsConfigList();
+  if (panel === 'row') populateRowFieldsForm();
+  if (panel === 'filters') populateAdvancedFilterForm();
+}
+
+// bascule une vue du panneau du bas : la referme si elle est déjà active,
+// sinon l'affiche et agrandit la barre si elle était repliée
+function toggleBottomBarPanel(panel, expandHeight) {
   if (!currentTable) return;
-  errorEditColumns.textContent = '';
-  formAddColumn.reset();
-  renderEditColumnsList();
-  modalEditColumns.classList.add('open');
-}
-
-function closeEditColumnsModal() {
-  modalEditColumns.classList.remove('open');
-}
-
-document.getElementById('btnEditColumns').addEventListener('click', openEditColumnsModal);
-document.getElementById('closeEditColumns').addEventListener('click', closeEditColumnsModal);
-modalEditColumns.addEventListener('click', (e) => {
-  if (e.target === modalEditColumns) closeEditColumnsModal();
-});
-
-formAddColumn.addEventListener('submit', async (e) => {
-  e.preventDefault();
-  errorEditColumns.textContent = '';
-
-  const name = document.getElementById('inputNewColName').value.trim();
-  const choice = resolveColumnChoice(document.getElementById('inputNewColType').value);
-  if (!name) return;
-
-  try {
-    const res = await fetch(`/api/${currentDb.id}/${currentTable.name}/columns`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name, type: choice.type, kind: choice.kind })
-    });
-    if (!res.ok) {
-      const data = await res.json().catch(() => ({}));
-      throw new Error(data.error || "Échec de l'ajout");
+  if (bottomBarActivePanel === panel) {
+    setBottomBarActivePanel(null);
+    setBottomBarHeight(BOTTOM_BAR_MIN_HEIGHT);
+  } else {
+    setBottomBarActivePanel(panel);
+    if (bottomBar.getBoundingClientRect().height <= BOTTOM_BAR_MIN_HEIGHT + 4) {
+      setBottomBarHeight(expandHeight);
     }
-    formAddColumn.reset();
-    await loadTableData();
-    renderEditColumnsList();
-    renderContent();
-  } catch (err) {
-    errorEditColumns.textContent = err.message;
   }
-});
+}
+
+document.getElementById('btnTotalsConfig').addEventListener('click', () => toggleBottomBarPanel('totals', 150));
+document.getElementById('btnAdvancedFilter').addEventListener('click', () => toggleBottomBarPanel('filters', 200));
+const FORMAT_OPERATOR_LABELS = { eq: '=', neq: '≠', gt: '>', gte: '≥', lt: '<', lte: '≤', contains: 'contient' };
 
 const modalQuery = document.getElementById('modalQuery');
 const queryInput = document.getElementById('queryInput');
@@ -2192,6 +2510,140 @@ document.getElementById('btnRunQuery').addEventListener('click', async () => {
   }
 });
 
+// =========================================================================
+// RECHERCHE GLOBALE — cherche dans toutes les tables de la base courante
+// =========================================================================
+
+let globalSearchCache = null; // { tableName: { columns, columnTypes, columnKinds, relations, relationOptions, rows } }
+
+async function loadGlobalSearchData() {
+  if (!currentDb) return;
+  const entries = await Promise.all(currentDb.tables.map(async t => {
+    const res = await fetch(`/api/${currentDb.id}/${t.name}`);
+    const data = res.ok ? await res.json() : { columns: [], rows: [] };
+    return [t.name, data];
+  }));
+  globalSearchCache = Object.fromEntries(entries);
+}
+
+function resolveGlobalRelationLabel(tableData, col, value) {
+  const relation = (tableData.relations || []).find(r => r.column === col);
+  if (!relation || value == null) return null;
+  const options = (tableData.relationOptions && tableData.relationOptions[col]) || [];
+  const match = options.find(o => String(o.id) === String(value));
+  return match ? match.label : null;
+}
+
+function runGlobalSearch(query) {
+  const q = query.trim().toLowerCase();
+  const results = [];
+  if (!q || !globalSearchCache) return results;
+
+  Object.entries(globalSearchCache).forEach(([tableName, data]) => {
+    (data.rows || []).forEach(row => {
+      const matchedCols = [];
+      (data.columns || []).forEach(col => {
+        const raw = row[col];
+        if (raw != null && String(raw).toLowerCase().includes(q)) {
+          matchedCols.push(col);
+          return;
+        }
+        const label = resolveGlobalRelationLabel(data, col, raw);
+        if (label && label.toLowerCase().includes(q)) matchedCols.push(col);
+      });
+      if (matchedCols.length > 0) results.push({ table: tableName, row, matchedCols });
+    });
+  });
+
+  return results;
+}
+
+function renderGlobalSearchResults(results, query) {
+  const container = document.getElementById('globalSearchResults');
+
+  if (!query.trim()) {
+    container.innerHTML = `<div class="global-search-empty">Tapez pour rechercher dans toutes les tables de « ${escapeHtml(currentDb.name)} ».</div>`;
+    return;
+  }
+  if (results.length === 0) {
+    container.innerHTML = `<div class="global-search-empty">Aucun résultat pour « ${escapeHtml(query)} ».</div>`;
+    return;
+  }
+
+  const byTable = {};
+  results.forEach(r => { (byTable[r.table] = byTable[r.table] || []).push(r); });
+
+  let html = '';
+  Object.entries(byTable).forEach(([tableName, tableResults]) => {
+    const data = globalSearchCache[tableName];
+    html += `<div class="global-search-group">
+      <div class="global-search-group-title">${escapeHtml(tableName)} <span>(${tableResults.length})</span></div>`;
+
+    tableResults.slice(0, 20).forEach(r => {
+      const previewCols = data.columns.filter(c => c !== 'id' && (!data.columnKinds || data.columnKinds[c] !== 'image')).slice(0, 4);
+      const preview = previewCols.map(c => {
+        const raw = r.row[c];
+        return resolveGlobalRelationLabel(data, c, raw) ?? raw;
+      }).filter(v => v !== null && v !== '' && v !== undefined).map(escapeHtml).join(' · ');
+
+      html += `<div class="global-search-result" data-table="${escapeHtml(tableName)}" data-row-id="${escapeHtml(r.row.id)}">
+        <span class="global-search-result-preview">${preview || '(vide)'}</span>
+        <span class="global-search-result-cols">${r.matchedCols.map(escapeHtml).join(', ')}</span>
+      </div>`;
+    });
+    if (tableResults.length > 20) {
+      html += `<div class="global-search-more">+ ${tableResults.length - 20} autre(s) résultat(s)…</div>`;
+    }
+    html += `</div>`;
+  });
+
+  container.innerHTML = html;
+
+  container.querySelectorAll('.global-search-result').forEach(el => {
+    el.addEventListener('click', async () => {
+      const tableName = el.dataset.table;
+      const rowId = el.dataset.rowId;
+      const table = currentDb.tables.find(t => t.name === tableName);
+      if (!table) return;
+
+      closeGlobalSearchModal();
+      viewMode = 'table';
+      currentTable = table;
+      resetTableView();
+      await loadTableData();
+      renderAll();
+      openRowDetailModal(rowId);
+    });
+  });
+}
+
+async function openGlobalSearchModal() {
+  if (!currentDb) return;
+  const modal = document.getElementById('modalGlobalSearch');
+  const input = document.getElementById('globalSearchInput');
+  const results = document.getElementById('globalSearchResults');
+
+  modal.classList.add('open');
+  input.value = '';
+  results.innerHTML = '<div class="global-search-empty">Chargement...</div>';
+  input.focus();
+
+  await loadGlobalSearchData();
+  results.innerHTML = `<div class="global-search-empty">Tapez pour rechercher dans toutes les tables de « ${escapeHtml(currentDb.name)} ».</div>`;
+}
+
+function closeGlobalSearchModal() {
+  document.getElementById('modalGlobalSearch').classList.remove('open');
+}
+
+document.getElementById('closeGlobalSearch').addEventListener('click', closeGlobalSearchModal);
+document.getElementById('modalGlobalSearch').addEventListener('click', (e) => {
+  if (e.target === document.getElementById('modalGlobalSearch')) closeGlobalSearchModal();
+});
+document.getElementById('globalSearchInput').addEventListener('input', (e) => {
+  renderGlobalSearchResults(runGlobalSearch(e.target.value), e.target.value);
+});
+
 function toCsv(columns, rows) {
   const escapeCsv = (val) => {
     const s = String(val ?? '');
@@ -2235,6 +2687,77 @@ document.getElementById('searchInput').addEventListener('input', (e) => {
   renderContent();
 });
 
+// =========================================================================
+// FILTRE AVANCÉ — plusieurs conditions combinées (ET/OU), purement côté client
+// =========================================================================
+
+const filterConditionsList = document.getElementById('filterConditionsList');
+
+function updateAdvancedFilterBadge() {
+  const badge = document.getElementById('advancedFilterBadge');
+  const count = advancedFilter && advancedFilter.conditions ? advancedFilter.conditions.length : 0;
+  badge.hidden = count === 0;
+  badge.textContent = count;
+}
+
+function addFilterConditionRow(condition) {
+  const cols = currentTableData.columns.filter(c => c !== 'id');
+  const row = document.createElement('div');
+  row.className = 'filter-condition-row';
+  row.innerHTML = `
+    <select class="filter-cond-column">${cols.map(c => `<option value="${escapeHtml(c)}">${escapeHtml(c)}</option>`).join('')}</select>
+    <select class="filter-cond-operator">
+      ${Object.entries(FORMAT_OPERATOR_LABELS).map(([key, label]) => `<option value="${key}">${escapeHtml(label)}</option>`).join('')}
+    </select>
+    <input type="text" class="filter-cond-value" placeholder="valeur">
+    <button type="button" class="btn-remove-col" title="Supprimer cette condition">×</button>
+  `;
+  if (condition) {
+    row.querySelector('.filter-cond-column').value = condition.column;
+    row.querySelector('.filter-cond-operator').value = condition.operator;
+    row.querySelector('.filter-cond-value').value = condition.value ?? '';
+  }
+  row.querySelector('.btn-remove-col').addEventListener('click', () => row.remove());
+  filterConditionsList.appendChild(row);
+}
+
+// remplit le panneau "Filtres" du bas — pas de fenêtre, comme Totaux et + Ligne
+function populateAdvancedFilterForm() {
+  if (!currentTable) return;
+  document.getElementById('errorAdvancedFilter').textContent = '';
+  filterConditionsList.innerHTML = '';
+  document.getElementById('filterCombinator').value = advancedFilter ? advancedFilter.combinator : 'AND';
+
+  const conditions = advancedFilter && advancedFilter.conditions.length > 0 ? advancedFilter.conditions : [null];
+  conditions.forEach(addFilterConditionRow);
+}
+
+document.getElementById('btnAddFilterCondition').addEventListener('click', () => addFilterConditionRow());
+
+document.getElementById('btnClearAdvancedFilter').addEventListener('click', () => {
+  advancedFilter = null;
+  updateAdvancedFilterBadge();
+  currentPage = 1;
+  populateAdvancedFilterForm();
+  renderContent();
+  showToast('Filtre avancé réinitialisé.', 'success');
+});
+
+document.getElementById('btnApplyAdvancedFilter').addEventListener('click', () => {
+  const combinator = document.getElementById('filterCombinator').value;
+  const conditions = Array.from(filterConditionsList.querySelectorAll('.filter-condition-row')).map(row => ({
+    column: row.querySelector('.filter-cond-column').value,
+    operator: row.querySelector('.filter-cond-operator').value,
+    value: row.querySelector('.filter-cond-value').value,
+  }));
+
+  advancedFilter = conditions.length > 0 ? { combinator, conditions } : null;
+  updateAdvancedFilterBadge();
+  currentPage = 1;
+  renderContent();
+  showToast('Filtre avancé appliqué.', 'success');
+});
+
 document.getElementById('btnDeleteSelected').addEventListener('click', async () => {
   if (!currentDb || !currentTable || selectedRowIds.size === 0) return;
   const ids = Array.from(selectedRowIds);
@@ -2243,8 +2766,11 @@ document.getElementById('btnDeleteSelected').addEventListener('click', async () 
     ids.map(id => fetchRowReferences(currentDb.id, currentTable.name, id))
   )).flat();
 
+  const bulkClosing = allRefs.some(r => !r.cascade)
+    ? `Les supprimer quand même laissera les liaisons non-cascade orphelines. Supprimer les ${ids.length} ligne(s) sélectionnée(s) ?`
+    : `Supprimer les ${ids.length} ligne(s) sélectionnée(s) ?`;
   const message = allRefs.length > 0
-    ? `Certaines lignes sélectionnées sont référencées ailleurs :\n${formatRowReferenceLines(allRefs).join('\n')}\n\nLes supprimer quand même laissera ces liaisons orphelines. Supprimer les ${ids.length} ligne(s) sélectionnée(s) ?`
+    ? `Certaines lignes sélectionnées sont référencées ailleurs :\n${formatRowReferenceLines(allRefs).join('\n')}\n\n${bulkClosing}`
     : `Supprimer définitivement ${ids.length} ligne(s) sélectionnée(s) ?`;
   const confirmed = await showConfirm(message, allRefs.length > 0 ? '⚠️ Lignes référencées ailleurs' : 'Supprimer la sélection');
   if (!confirmed) return;
@@ -2359,6 +2885,67 @@ if (localStorage.getItem('sidebarCollapsed') === '1') {
 
 btnSidebarToggle.addEventListener('click', () => {
   setSidebarCollapsed(!sidebar.classList.contains('collapsed'));
+});
+
+// =========================================================================
+// BARRE DU BAS — hauteur ajustable en tirant son bord supérieur, mémorisée
+// =========================================================================
+
+const bottomBar = document.getElementById('bottomBar');
+const bottomBarResizeHandle = document.getElementById('bottomBarResizeHandle');
+const bottomBarPanel = document.getElementById('bottomBarPanel');
+const BOTTOM_BAR_MIN_HEIGHT = 34;
+let bottomBarResizeState = null;
+// vrai quand une table est affichée en vue tableau : le panneau d'actions n'a de
+// sens que dans ce contexte, même si la barre a été laissée agrandie
+let bottomBarPanelHasContext = false;
+
+// pas de plafond fixe : seule la place restante à l'écran limite l'agrandissement
+// (garde la même marge que le max-height CSS de .bottom-bar)
+function getBottomBarMaxHeight() {
+  return Math.max(BOTTOM_BAR_MIN_HEIGHT, window.innerHeight - 140);
+}
+
+function updateBottomBarPanelVisibility() {
+  const expanded = bottomBar.getBoundingClientRect().height > BOTTOM_BAR_MIN_HEIGHT + 4;
+  bottomBarPanel.style.display = (bottomBarPanelHasContext && expanded) ? 'flex' : 'none';
+}
+
+function setBottomBarPanelContext(hasContext) {
+  bottomBarPanelHasContext = hasContext;
+  if (!hasContext && bottomBarActivePanel !== null) setBottomBarActivePanel(null);
+  updateBottomBarPanelVisibility();
+}
+
+function setBottomBarHeight(height) {
+  const clamped = Math.min(getBottomBarMaxHeight(), Math.max(BOTTOM_BAR_MIN_HEIGHT, Math.round(height)));
+  bottomBar.style.height = clamped + 'px';
+  localStorage.setItem('bottomBarHeight', String(clamped));
+  updateBottomBarPanelVisibility();
+}
+
+const savedBottomBarHeight = parseInt(localStorage.getItem('bottomBarHeight'), 10);
+if (!Number.isNaN(savedBottomBarHeight)) setBottomBarHeight(savedBottomBarHeight);
+
+bottomBarResizeHandle.addEventListener('mousedown', (e) => {
+  e.preventDefault();
+  bottomBarResizeState = { startY: e.clientY, startHeight: bottomBar.getBoundingClientRect().height };
+  bottomBarResizeHandle.classList.add('dragging');
+  document.body.classList.add('bottom-bar-resizing');
+});
+
+document.addEventListener('mousemove', (e) => {
+  if (!bottomBarResizeState) return;
+  // le bord tiré est le bord SUPÉRIEUR de la barre : monter la souris (dy positif) l'agrandit
+  const dy = bottomBarResizeState.startY - e.clientY;
+  setBottomBarHeight(bottomBarResizeState.startHeight + dy);
+});
+
+document.addEventListener('mouseup', () => {
+  if (!bottomBarResizeState) return;
+  bottomBarResizeState = null;
+  bottomBarResizeHandle.classList.remove('dragging');
+  document.body.classList.remove('bottom-bar-resizing');
 });
 
 function openMobileSidebar() {
