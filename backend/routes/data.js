@@ -10,6 +10,18 @@ const {
   reorderTables,
   setNodePosition,
   setNodePositions,
+  setPinnedColumn,
+  setColumnTotal,
+  setColumnValidation,
+  listIndexes,
+  createIndex,
+  dropIndex,
+  addFormulaColumn,
+  removeFormulaColumn,
+  addConditionalFormat,
+  removeConditionalFormat,
+  addComputedColumn,
+  removeComputedColumn,
   createTable,
   dropTable,
   getTableData,
@@ -248,6 +260,94 @@ router.post('/:dbId/:tableName/columns', (req, res) => {
   }
 });
 
+// POST /api/:dbId/:tableName/computed-columns  { name, sourceColumn, refTable, refColumn }
+// -> ajoute un champ calculé (compte les lignes de refTable dont refColumn correspond
+// à sourceColumn sur cette ligne) ; ce n'est pas une vraie colonne SQL, juste une définition
+router.post('/:dbId/:tableName/computed-columns', (req, res) => {
+  try {
+    const { dbId, tableName } = req.params;
+    const { name, sourceColumn, refTable, refColumn } = req.body;
+    if (!name || !name.trim()) {
+      return res.status(400).json({ error: 'Le nom de la colonne est requis.' });
+    }
+    if (!sourceColumn || !refTable || !refColumn) {
+      return res.status(400).json({ error: 'La colonne source, la table et la colonne référencées sont requises.' });
+    }
+    const column = addComputedColumn(dbId, tableName, name.trim(), { sourceColumn, refTable, refColumn });
+    res.status(201).json(column);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// DELETE /api/:dbId/:tableName/computed-columns/:columnName -> supprime un champ calculé
+router.delete('/:dbId/:tableName/computed-columns/:columnName', (req, res) => {
+  try {
+    const { dbId, tableName, columnName } = req.params;
+    removeComputedColumn(dbId, tableName, columnName);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/:dbId/:tableName/formula-columns  { name, expression } -> ajoute un champ
+// calculé à partir d'autres colonnes de la même ligne (ex: "prix * quantite")
+router.post('/:dbId/:tableName/formula-columns', (req, res) => {
+  try {
+    const { dbId, tableName } = req.params;
+    const { name, expression } = req.body;
+    if (!name || !name.trim()) {
+      return res.status(400).json({ error: 'Le nom de la colonne est requis.' });
+    }
+    if (!expression || !expression.trim()) {
+      return res.status(400).json({ error: "L'expression est requise." });
+    }
+    const column = addFormulaColumn(dbId, tableName, name.trim(), expression.trim());
+    res.status(201).json(column);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// DELETE /api/:dbId/:tableName/formula-columns/:columnName -> supprime un champ calculé
+router.delete('/:dbId/:tableName/formula-columns/:columnName', (req, res) => {
+  try {
+    const { dbId, tableName, columnName } = req.params;
+    removeFormulaColumn(dbId, tableName, columnName);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/:dbId/:tableName/conditional-formats  { column, operator, value, color, target }
+// -> ajoute une règle de mise en forme conditionnelle (target: 'cell' | 'row')
+router.post('/:dbId/:tableName/conditional-formats', (req, res) => {
+  try {
+    const { dbId, tableName } = req.params;
+    const { column, operator, value, color, target } = req.body;
+    if (!column || !operator || !color) {
+      return res.status(400).json({ error: 'Colonne, opérateur et couleur sont requis.' });
+    }
+    const rule = addConditionalFormat(dbId, tableName, { column, operator, value, color, target });
+    res.status(201).json(rule);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// DELETE /api/:dbId/:tableName/conditional-formats/:ruleId -> supprime une règle
+router.delete('/:dbId/:tableName/conditional-formats/:ruleId', (req, res) => {
+  try {
+    const { dbId, tableName, ruleId } = req.params;
+    removeConditionalFormat(dbId, tableName, ruleId);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // PATCH /api/:dbId/:tableName/columns/:columnName  { newName } -> renomme une colonne
 router.patch('/:dbId/:tableName/columns/:columnName', (req, res) => {
   try {
@@ -258,6 +358,79 @@ router.patch('/:dbId/:tableName/columns/:columnName', (req, res) => {
     }
     const column = renameColumn(dbId, tableName, columnName, newName.trim());
     res.json(column);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// PUT /api/:dbId/:tableName/pinned-column  { column } -> épingle une colonne (colonne vide/nulle pour désépingler)
+router.put('/:dbId/:tableName/pinned-column', (req, res) => {
+  try {
+    const { dbId, tableName } = req.params;
+    const { column } = req.body;
+    setPinnedColumn(dbId, tableName, column || null);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// PUT /api/:dbId/:tableName/columns/:columnName/total  { fn } -> agrégat affiché en pied de tableau
+// (fn : 'sum' | 'avg' | 'count' | 'min' | 'max', ou vide/nul pour retirer)
+router.put('/:dbId/:tableName/columns/:columnName/total', (req, res) => {
+  try {
+    const { dbId, tableName, columnName } = req.params;
+    const { fn } = req.body;
+    setColumnTotal(dbId, tableName, columnName, fn || null);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// PUT /api/:dbId/:tableName/columns/:columnName/validation  { required, min, max, pattern, defaultValue }
+// -> configure les règles de validation d'une colonne (objet vide pour tout retirer)
+router.put('/:dbId/:tableName/columns/:columnName/validation', (req, res) => {
+  try {
+    const { dbId, tableName, columnName } = req.params;
+    setColumnValidation(dbId, tableName, columnName, req.body || {});
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/:dbId/:tableName/indexes -> liste les index (et contraintes d'unicité) de la table
+router.get('/:dbId/:tableName/indexes', (req, res) => {
+  try {
+    const { dbId, tableName } = req.params;
+    res.json(listIndexes(dbId, tableName));
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/:dbId/:tableName/indexes  { columns, unique } -> crée un index (unique ou non)
+router.post('/:dbId/:tableName/indexes', (req, res) => {
+  try {
+    const { dbId, tableName } = req.params;
+    const { columns, unique } = req.body;
+    if (!columns || (Array.isArray(columns) && columns.length === 0)) {
+      return res.status(400).json({ error: 'Au moins une colonne est requise.' });
+    }
+    const index = createIndex(dbId, tableName, columns, !!unique);
+    res.status(201).json(index);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// DELETE /api/:dbId/:tableName/indexes/:indexName -> supprime un index
+router.delete('/:dbId/:tableName/indexes/:indexName', (req, res) => {
+  try {
+    const { dbId, indexName } = req.params;
+    dropIndex(dbId, indexName);
+    res.json({ success: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -274,16 +447,17 @@ router.delete('/:dbId/:tableName/columns/:columnName', (req, res) => {
   }
 });
 
-// POST /api/:dbId/:tableName/columns/:columnName/relation  { refTable, refColumn, refDisplay }
-// -> lie une colonne à une autre table (clé étrangère "logique")
+// POST /api/:dbId/:tableName/columns/:columnName/relation  { refTable, refColumn, refDisplay, cascade }
+// -> lie une colonne à une autre table (clé étrangère "logique") ; cascade active la
+// suppression automatique des lignes qui référencent une ligne supprimée de refTable
 router.post('/:dbId/:tableName/columns/:columnName/relation', (req, res) => {
   try {
     const { dbId, tableName, columnName } = req.params;
-    const { refTable, refColumn, refDisplay } = req.body;
+    const { refTable, refColumn, refDisplay, cascade } = req.body;
     if (!refTable || !refColumn) {
       return res.status(400).json({ error: 'La table et la colonne référencées sont requises.' });
     }
-    const relation = setRelation(dbId, tableName, columnName, refTable, refColumn, refDisplay);
+    const relation = setRelation(dbId, tableName, columnName, refTable, refColumn, refDisplay, !!cascade);
     res.status(201).json(relation);
   } catch (err) {
     res.status(500).json({ error: err.message });

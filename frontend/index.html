@@ -38,37 +38,22 @@
     <div class="topbar">
       <button class="btn-mobile-menu" id="btnMobileMenu" title="Ouvrir le menu">☰</button>
 
-      <div class="content-toolbar" id="contentToolbar">
-        <div class="toolbar-actions">
-          <button class="btn-toolbar" id="btnAddRow">+ Ligne</button>
-          <input type="file" id="csvFileInput" accept=".csv" hidden>
-
-          <div class="menu-item">
-            <button class="btn-toolbar menu-trigger" id="btnFileMenu">Fichier <span class="menu-caret">▾</span></button>
-            <div class="menu-dropdown" id="fileMenuDropdown">
-              <button class="menu-option" id="btnImportCsv">⇪ Importer CSV</button>
-              <button class="menu-option" id="btnExportCsv">⇩ Exporter CSV</button>
-              <button class="menu-option" id="btnExportJson">⇩ Exporter JSON</button>
-            </div>
-          </div>
-
-          <button class="btn-toolbar" id="btnEditColumns">⚙ Colonnes</button>
-
-          <div class="toolbar-inner-divider"></div>
-
-          <div class="search-wrapper">
-            <span class="search-icon">🔍</span>
-            <input type="text" id="searchInput" class="search-input" placeholder="Rechercher...">
+      <div class="topbar-toolbar" id="topbarToolbar">
+        <div class="menu-item">
+          <button class="btn-toolbar menu-trigger" id="btnFileMenu">Fichier <span class="menu-caret">▾</span></button>
+          <div class="menu-dropdown" id="fileMenuDropdown">
+            <button class="menu-option" id="btnImportCsv">⇪ Importer CSV</button>
+            <button class="menu-option" id="btnExportCsv">⇩ Exporter CSV</button>
+            <button class="menu-option" id="btnExportJson">⇩ Exporter JSON</button>
           </div>
         </div>
-        <button class="btn-toolbar btn-toolbar-danger" id="btnDeleteSelected" hidden>🗑 Supprimer (0)</button>
+        <div class="search-wrapper">
+          <span class="search-icon">🔍</span>
+          <input type="text" id="searchInput" class="search-input" placeholder="Rechercher...">
+        </div>
       </div>
 
       <div class="topbar-center">
-        <div class="view-switcher" id="viewSwitcher">
-          <button class="view-switch-btn active" id="btnViewTable" title="Vue tableau">📋 Tableau</button>
-          <button class="view-switch-btn" id="btnViewGraph" title="Vue schéma : tables déplaçables et liaisons">🕸 Schéma</button>
-        </div>
         <button class="btn-nav-arrow" id="btnUndo" title="Annuler la dernière modification de cellule" disabled>↺</button>
         <button class="btn-nav-arrow" id="btnRedo" title="Rétablir la modification annulée" disabled>↻</button>
         <div class="topbar-title">
@@ -95,7 +80,61 @@
     <div class="tabs" id="tabs"></div>
 
     <div class="content" id="content"></div>
-    <div class="pagination" id="pagination"></div>
+    <div class="bottom-bar" id="bottomBar">
+      <div class="bottom-bar-resize-handle" id="bottomBarResizeHandle" title="Glisser pour redimensionner"></div>
+
+      <div class="bottom-bar-tabs">
+        <button class="bottom-tab active" id="btnViewTable" title="Vue tableau">📋 Tableau</button>
+        <button class="bottom-tab" id="btnViewGraph" title="Vue schéma : tables déplaçables et liaisons">🕸 Schéma</button>
+        <div class="bottom-bar-sep"></div>
+        <button class="bottom-tab" id="btnAdvancedFilter" title="Filtre avancé (plusieurs conditions)">⚙ Filtres<span id="advancedFilterBadge" class="filter-badge" hidden></span></button>
+        <button class="bottom-tab" id="btnTotalsConfig" title="Choisir les totaux affichés en bas">Σ Totaux</button>
+        <button class="bottom-tab" id="btnAddRow">+ Ligne</button>
+        <input type="file" id="csvFileInput" accept=".csv" hidden>
+        <div class="bottom-bar-right">
+          <div class="bottom-bar-totals" id="totalsBar" hidden></div>
+          <div class="pagination" id="pagination"></div>
+        </div>
+      </div>
+
+      <!-- panneau révélé en agrandissant la barre : vue "actions" par défaut, ou vue
+           "totaux" quand on clique l'onglet Σ Totaux (change ici, pas dans une fenêtre) -->
+      <div class="bottom-bar-panel" id="bottomBarPanel">
+        <div class="bottom-bar-panel-view active" id="bottomBarPanelActions">
+          <button class="btn-toolbar btn-toolbar-danger" id="btnDeleteSelected" hidden>🗑 Supprimer (0)</button>
+        </div>
+        <div class="bottom-bar-panel-view" id="bottomBarPanelTotals">
+          <div id="totalsConfigList" class="totals-config-list"></div>
+        </div>
+        <div class="bottom-bar-panel-view" id="bottomBarPanelRow">
+          <form id="formNewRow" class="inline-row-form">
+            <div id="rowFieldsList" class="inline-row-fields"></div>
+            <div class="inline-row-form-footer">
+              <button type="submit" class="btn-primary">+ Ajouter la ligne</button>
+              <p class="form-error" id="errorNewRow"></p>
+            </div>
+          </form>
+        </div>
+        <div class="bottom-bar-panel-view" id="bottomBarPanelFilters">
+          <div class="inline-filters-form">
+            <div class="filter-combinator">
+              Combiner les conditions avec
+              <select id="filterCombinator">
+                <option value="AND">ET (toutes les conditions)</option>
+                <option value="OR">OU (au moins une condition)</option>
+              </select>
+            </div>
+            <div id="filterConditionsList" class="filter-conditions-list"></div>
+            <div class="inline-row-form-footer">
+              <button type="button" class="btn-add-col" id="btnAddFilterCondition">+ Ajouter une condition</button>
+              <button type="button" class="btn-secondary" id="btnClearAdvancedFilter">Réinitialiser</button>
+              <button type="button" class="btn-primary" id="btnApplyAdvancedFilter">Appliquer</button>
+              <p class="form-error" id="errorAdvancedFilter"></p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
   </main>
 
 </div>
@@ -167,39 +206,26 @@
   </div>
 </div>
 
-<!-- MODALE : ajouter une ligne -->
-<div class="modal-overlay" id="modalNewRow">
-  <div class="modal">
-    <h2>Nouvelle ligne</h2>
-    <form id="formNewRow">
-      <div id="rowFieldsList"></div>
-      <p class="form-error" id="errorNewRow"></p>
-      <div class="modal-actions">
-        <button type="button" class="btn-secondary" id="cancelNewRow">Annuler</button>
-        <button type="submit" class="btn-primary">Ajouter</button>
-      </div>
-    </form>
+
+<!-- MODALE : détail d'une ligne -->
+<div class="modal-overlay" id="modalRowDetail">
+  <div class="modal modal-wide">
+    <h2 id="rowDetailTitle">Détail de la ligne</h2>
+    <div id="rowDetailFields" class="row-detail-grid"></div>
+    <div class="modal-actions">
+      <button type="button" class="btn-secondary" id="closeRowDetail">Fermer</button>
+    </div>
   </div>
 </div>
 
-<!-- MODALE : éditer les colonnes d'une table -->
-<div class="modal-overlay" id="modalEditColumns">
-  <div class="modal">
-    <h2>Colonnes de la table</h2>
-    <div id="editColumnsList"></div>
-
-    <div class="columns-header">
-      <span>Ajouter une colonne</span>
-    </div>
-    <form id="formAddColumn" class="inline-add-column">
-      <input type="text" id="inputNewColName" placeholder="nom de la colonne" required>
-      <select id="inputNewColType"></select>
-      <button type="submit" class="btn-primary">+ Ajouter</button>
-    </form>
-
-    <p class="form-error" id="errorEditColumns"></p>
+<!-- MODALE : recherche globale (toutes les tables de la base) -->
+<div class="modal-overlay" id="modalGlobalSearch">
+  <div class="modal modal-wide">
+    <h2>Recherche globale</h2>
+    <input type="text" id="globalSearchInput" class="global-search-input" placeholder="Rechercher dans toutes les tables...">
+    <div id="globalSearchResults" class="global-search-results"></div>
     <div class="modal-actions">
-      <button type="button" class="btn-secondary" id="closeEditColumns">Fermer</button>
+      <button type="button" class="btn-secondary" id="closeGlobalSearch">Fermer</button>
     </div>
   </div>
 </div>
