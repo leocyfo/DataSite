@@ -196,6 +196,23 @@ function reorderTables(dbId, orderedNames) {
   saveRegistry(registry);
 }
 
+function reorderColumns(dbId, tableName, orderedNames) {
+  const registry = loadRegistry();
+  const entry = registry.find(d => d.id === dbId);
+  if (!entry) throw new Error(`Base de données inconnue: ${dbId}`);
+  const safeTable = safeIdentifier(tableName);
+  entry.columnOrder = entry.columnOrder || {};
+  entry.columnOrder[safeTable] = orderedNames;
+  saveRegistry(registry);
+}
+
+function getColumnOrder(dbId, tableName) {
+  const registry = loadRegistry();
+  const entry = registry.find(d => d.id === dbId);
+  const safeTable = safeIdentifier(tableName);
+  return (entry && entry.columnOrder && entry.columnOrder[safeTable]) || [];
+}
+
 function getRelations(dbId) {
   const registry = loadRegistry();
   const entry = registry.find(d => d.id === dbId);
@@ -613,6 +630,9 @@ function dropTable(dbId, tableName) {
     if (entry.conditionalFormats) {
       delete entry.conditionalFormats[safeTable];
     }
+    if (entry.columnOrder) {
+      delete entry.columnOrder[safeTable];
+    }
     saveRegistry(registry);
   }
 }
@@ -829,6 +849,15 @@ function getTableData(dbId, tableName) {
   const formulas = getFormulaColumns(dbId, tableName);
   const conditionalFormats = getConditionalFormats(dbId, tableName);
 
+  // applique l'ordre d'affichage sauvegardé (colonnes calculées/formule incluses,
+  // comme pinnedColumn) ; les colonnes non listées (nouvelles depuis) suivent à la fin
+  const savedOrder = getColumnOrder(dbId, tableName);
+  if (savedOrder.length) {
+    const reordered = [...savedOrder.filter(c => columns.includes(c)), ...columns.filter(c => !savedOrder.includes(c))];
+    columns.length = 0;
+    columns.push(...reordered);
+  }
+
   return { columns, columnTypes, columnKinds, rows, relations, relationOptions, pinnedColumn, totals, columnValidation, indexes, formulas, conditionalFormats };
 }
 
@@ -990,6 +1019,10 @@ function renameTable(dbId, tableName, newTableName) {
       entry.conditionalFormats[safeNewTable] = entry.conditionalFormats[safeTable];
       delete entry.conditionalFormats[safeTable];
     }
+    if (entry.columnOrder && entry.columnOrder[safeTable]) {
+      entry.columnOrder[safeNewTable] = entry.columnOrder[safeTable];
+      delete entry.columnOrder[safeTable];
+    }
     saveRegistry(registry);
   }
 
@@ -1056,6 +1089,9 @@ function renameColumn(dbId, tableName, columnName, newColumnName) {
       if (rule.column === safeCol) rule.column = safeNewCol;
     });
   }
+  if (entry && entry.columnOrder && entry.columnOrder[safeTable]) {
+    entry.columnOrder[safeTable] = entry.columnOrder[safeTable].map(c => (c === safeCol ? safeNewCol : c));
+  }
   if (entry) saveRegistry(registry);
 
   return { name: safeNewCol };
@@ -1105,6 +1141,9 @@ function dropColumn(dbId, tableName, columnName) {
   }
   if (entry && entry.conditionalFormats && entry.conditionalFormats[safeTable]) {
     entry.conditionalFormats[safeTable] = entry.conditionalFormats[safeTable].filter(rule => rule.column !== safeCol);
+  }
+  if (entry && entry.columnOrder && entry.columnOrder[safeTable]) {
+    entry.columnOrder[safeTable] = entry.columnOrder[safeTable].filter(c => c !== safeCol);
   }
   if (entry) saveRegistry(registry);
 }
@@ -1187,6 +1226,7 @@ module.exports = {
   deleteDatabase,
   reorderDatabases,
   reorderTables,
+  reorderColumns,
   setNodePosition,
   setNodePositions,
   getPinnedColumn,

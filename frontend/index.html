@@ -5,6 +5,9 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>DB Explorer — Local</title>
 <link rel="stylesheet" href="style.css">
+<script>
+  if (localStorage.getItem('theme') === 'light') document.documentElement.setAttribute('data-theme', 'light');
+</script>
 </head>
 <body>
 
@@ -28,6 +31,7 @@
       Node.js · SQLite<br>
       Chargement...
     </div>
+    <button class="btn-theme-toggle" id="btnThemeToggle" title="Basculer le thème clair/sombre">🌙 Thème sombre</button>
     <button class="btn-logout" id="btnLogout">Déconnexion</button>
   </aside>
 
@@ -89,6 +93,7 @@
         <div class="bottom-bar-sep"></div>
         <button class="bottom-tab" id="btnAdvancedFilter" title="Filtre avancé (plusieurs conditions)">⚙ Filtres<span id="advancedFilterBadge" class="filter-badge" hidden></span></button>
         <button class="bottom-tab" id="btnTotalsConfig" title="Choisir les totaux affichés en bas">Σ Totaux</button>
+        <button class="bottom-tab" id="btnOpenColumnsModal" title="Gérer les colonnes (renommer, liaisons, validation, index, champs calculés, mise en forme)">🛠 Colonnes</button>
         <button class="bottom-tab" id="btnAddRow">+ Ligne</button>
         <input type="file" id="csvFileInput" accept=".csv" hidden>
         <div class="bottom-bar-right">
@@ -206,6 +211,97 @@
   </div>
 </div>
 
+
+<!-- MODALE : gestion des colonnes (renommer/supprimer, liaisons, validation,
+     index, champs calculés/formule, mise en forme conditionnelle) -->
+<div class="modal-overlay" id="modalColumns">
+  <div class="modal modal-columns">
+    <h2>Gérer les colonnes — <span id="columnsModalTableName"></span></h2>
+
+    <div class="columns-modal-tabs">
+      <button type="button" class="columns-modal-tab active" data-tab="column">Colonne</button>
+      <button type="button" class="columns-modal-tab" data-tab="index">Index</button>
+      <button type="button" class="columns-modal-tab" data-tab="computed">Champs calculés</button>
+      <button type="button" class="columns-modal-tab" data-tab="format">Mise en forme</button>
+    </div>
+
+    <!-- ONGLET COLONNE -->
+    <div class="columns-modal-view active" id="columnsModalViewColumn">
+      <label>Colonne à gérer
+        <select id="columnsModalColumnSelect"></select>
+      </label>
+      <div id="columnsModalColumnBody"></div>
+
+      <div class="columns-modal-section">
+        <div class="columns-header"><span>Ajouter une colonne</span></div>
+        <form id="formColumnsModalAddColumn" class="columns-modal-row columns-modal-row-wrap">
+          <input type="text" id="inputColumnsModalNewColName" placeholder="nom de la colonne" required>
+          <select id="selectColumnsModalNewColType"></select>
+          <button type="submit" class="btn-add-col">+ Ajouter</button>
+        </form>
+        <p class="form-error" id="errorColumnsModalAddColumn"></p>
+      </div>
+    </div>
+
+    <!-- ONGLET INDEX -->
+    <div class="columns-modal-view" id="columnsModalViewIndex">
+      <div id="columnsModalIndexList" class="columns-modal-list"></div>
+      <div class="columns-modal-section">
+        <div class="columns-header"><span>Créer un index</span></div>
+        <form id="formColumnsModalAddIndex" class="columns-modal-row columns-modal-row-wrap">
+          <div id="columnsModalIndexCheckboxes" class="columns-modal-checkbox-group"></div>
+          <label class="checkbox-inline"><input type="checkbox" id="checkboxColumnsModalIndexUnique"> Unique</label>
+          <button type="submit" class="btn-add-col">+ Créer l'index</button>
+        </form>
+        <p class="form-error" id="errorColumnsModalAddIndex"></p>
+      </div>
+    </div>
+
+    <!-- ONGLET CHAMPS CALCULÉS -->
+    <div class="columns-modal-view" id="columnsModalViewComputed">
+      <div class="columns-header"><span>Champs calculés (comptage lié à une autre table)</span></div>
+      <div id="columnsModalComputedList" class="columns-modal-list"></div>
+      <form id="formColumnsModalAddComputed" class="columns-modal-row columns-modal-row-wrap">
+        <input type="text" id="inputComputedName" placeholder="nom du champ" required>
+        <select id="selectComputedSourceColumn"></select>
+        <select id="selectComputedRefTable"></select>
+        <select id="selectComputedRefColumn"></select>
+        <button type="submit" class="btn-add-col">+ Ajouter</button>
+      </form>
+      <p class="form-error" id="errorColumnsModalAddComputed"></p>
+
+      <div class="columns-header"><span>Champs formule (calcul à partir d'autres colonnes de la ligne)</span></div>
+      <div id="columnsModalFormulaList" class="columns-modal-list"></div>
+      <form id="formColumnsModalAddFormula" class="columns-modal-row columns-modal-row-wrap">
+        <input type="text" id="inputFormulaName" placeholder="nom du champ" required>
+        <input type="text" id="inputFormulaExpression" placeholder="ex : prix * quantite" required>
+        <button type="submit" class="btn-add-col">+ Ajouter</button>
+      </form>
+      <p class="form-error" id="errorColumnsModalAddFormula"></p>
+    </div>
+
+    <!-- ONGLET MISE EN FORME -->
+    <div class="columns-modal-view" id="columnsModalViewFormat">
+      <div id="columnsModalFormatList" class="columns-modal-list"></div>
+      <form id="formColumnsModalAddFormat" class="columns-modal-row columns-modal-row-wrap">
+        <select id="selectFormatColumn"></select>
+        <select id="selectFormatOperator"></select>
+        <input type="text" id="inputFormatValue" placeholder="valeur">
+        <input type="color" id="inputFormatColor" value="#e8a33d" title="Couleur">
+        <select id="selectFormatTarget">
+          <option value="cell">Cellule</option>
+          <option value="row">Ligne entière</option>
+        </select>
+        <button type="submit" class="btn-add-col">+ Ajouter</button>
+      </form>
+      <p class="form-error" id="errorColumnsModalAddFormat"></p>
+    </div>
+
+    <div class="modal-actions">
+      <button type="button" class="btn-secondary" id="closeColumnsModal">Fermer</button>
+    </div>
+  </div>
+</div>
 
 <!-- MODALE : détail d'une ligne -->
 <div class="modal-overlay" id="modalRowDetail">

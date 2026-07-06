@@ -311,10 +311,12 @@ function enableDragReorder(container, itemSelector, direction, onDrop) {
       ? (e.clientY - rect.top) < rect.height / 2
       : (e.clientX - rect.left) < rect.width / 2;
 
+    // insertBefore doit être appelé sur le parent RÉEL de item (pas forcément
+    // `container` : les th d'en-tête ont pour parent le <tr>, pas #content)
     if (before) {
-      container.insertBefore(draggedEl, item);
+      item.parentNode.insertBefore(draggedEl, item);
     } else {
-      container.insertBefore(draggedEl, item.nextSibling);
+      item.parentNode.insertBefore(draggedEl, item.nextSibling);
     }
   });
 
@@ -712,10 +714,13 @@ function renderContent() {
     const isSorted = sortState.column === col;
     const arrow = isSorted ? (sortState.dir === 'asc' ? ' ▲' : ' ▼') : '';
     const isPinned = col === pinnedCol;
-    html += `<th class="sortable${isPinned ? ' col-pinned' : ''}" data-column="${escapeHtml(col)}">
+    const isComputedOrFormula = currentTableData.columnKinds && ['computed', 'formula'].includes(currentTableData.columnKinds[col]);
+    const showGear = col !== 'id' && !isComputedOrFormula;
+    html += `<th class="sortable${isPinned ? ' col-pinned' : ''}" data-column="${escapeHtml(col)}" draggable="${!isPinned}" title="Glisser pour réordonner">
       <div class="th-inner">
         <span class="th-label">${escapeHtml(col)}${arrow}</span>
         <button type="button" class="btn-pin-col${isPinned ? ' pinned' : ''}" data-column="${escapeHtml(col)}" title="${isPinned ? 'Désépingler cette colonne' : 'Épingler cette colonne (la garder visible en défilant)'}">📌</button>
+        ${showGear ? `<button type="button" class="btn-columns-col" data-column="${escapeHtml(col)}" title="Gérer cette colonne">⚙</button>` : ''}
       </div>
     </th>`;
   });
@@ -843,6 +848,13 @@ function renderContent() {
     });
   });
 
+  content.querySelectorAll('.btn-columns-col').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      openColumnsModal(btn.dataset.column);
+    });
+  });
+
   const selectAllCheckbox = document.getElementById('selectAllCheckbox');
   if (selectAllCheckbox) {
     selectAllCheckbox.addEventListener('change', () => {
@@ -924,6 +936,21 @@ function renderContent() {
       if (e.key === 'Enter') {
         e.preventDefault();
         td.blur();
+        // Entrée / Maj+Entrée déplace vers la même colonne à la ligne suivante/
+        // précédente (pas de navigation aux flèches : elles servent à déplacer
+        // le curseur texte à l'intérieur d'une cellule contenteditable)
+        const tr = td.closest('tr');
+        const targetTr = e.shiftKey ? tr.previousElementSibling : tr.nextElementSibling;
+        const targetCell = targetTr ? targetTr.querySelector(`td.editable[data-column="${td.dataset.column}"]`) : null;
+        if (targetCell) {
+          targetCell.focus();
+          const range = document.createRange();
+          range.selectNodeContents(targetCell);
+          range.collapse(false);
+          const selection = window.getSelection();
+          selection.removeAllRanges();
+          selection.addRange(range);
+        }
       }
     });
 
@@ -2511,6 +2538,452 @@ document.getElementById('btnRunQuery').addEventListener('click', async () => {
 });
 
 // =========================================================================
+// MODALE COLONNES — renommer/supprimer, liaisons, validation, index,
+// champs calculés/formule, mise en forme conditionnelle. Fenêtre dédiée
+// (960px) plutôt que la barre du bas : cette dernière a été essayée et
+// abandonnée, ses lignes larges (liaison, validation) ne rentrant jamais
+// de façon fiable dans une colonne redimensionnable.
+// =========================================================================
+
+async function columnsModalRequest(url, options) {
+  const res = await fetch(url, options);
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || `Erreur inconnue (${res.status})`);
+  return data;
+}
+
+// colonnes gérables individuellement dans l'onglet "Colonne" et le bouton ⚙
+// d'en-tête : ni id (clé technique), ni les champs calculés/formule (gérés
+// dans leur propre onglet, pas de renommer/lier/valider sur ceux-ci)
+function realColumns() {
+  return (currentTableData.columns || []).filter(col => col !== 'id' &&
+    (!currentTableData.columnKinds || !['computed', 'formula'].includes(currentTableData.columnKinds[col])));
+}
+
+const modalColumns = document.getElementById('modalColumns');
+let columnsModalActiveTab = 'column';
+let columnsModalSelectedColumn = null;
+
+function openColumnsModal(preselectColumn) {
+  if (!currentTable) return;
+  document.getElementById('columnsModalTableName').textContent = currentTable.name;
+  columnsModalActiveTab = 'column';
+  document.querySelectorAll('.columns-modal-tab').forEach(btn => btn.classList.toggle('active', btn.dataset.tab === 'column'));
+  document.querySelectorAll('.columns-modal-view').forEach(view => view.classList.toggle('active', view.id === 'columnsModalViewColumn'));
+  const cols = realColumns();
+  columnsModalSelectedColumn = (preselectColumn && cols.includes(preselectColumn)) ? preselectColumn : (cols[0] || null);
+  renderColumnsModalBody();
+  modalColumns.classList.add('open');
+}
+
+function closeColumnsModal() {
+  modalColumns.classList.remove('open');
+}
+
+document.getElementById('btnOpenColumnsModal').addEventListener('click', () => openColumnsModal());
+document.getElementById('closeColumnsModal').addEventListener('click', closeColumnsModal);
+modalColumns.addEventListener('click', (e) => { if (e.target === modalColumns) closeColumnsModal(); });
+
+document.querySelectorAll('.columns-modal-tab').forEach(btn => {
+  btn.addEventListener('click', () => {
+    columnsModalActiveTab = btn.dataset.tab;
+    document.querySelectorAll('.columns-modal-tab').forEach(b => b.classList.toggle('active', b === btn));
+    document.querySelectorAll('.columns-modal-view').forEach(view => view.classList.toggle('active', view.id === `columnsModalView${btn.dataset.tab[0].toUpperCase()}${btn.dataset.tab.slice(1)}`));
+    renderColumnsModalBody();
+  });
+});
+
+// après chaque mutation : recharge les données de la table et rafraîchit à la
+// fois la grille (derrière la modale) et le contenu de la modale elle-même
+async function refreshColumnsModal() {
+  await loadTableData();
+  renderContent();
+  renderColumnsModalBody();
+}
+
+function renderColumnsModalBody() {
+  if (!currentTable) return;
+  if (columnsModalActiveTab === 'column') renderColumnsModalColumnTab();
+  else if (columnsModalActiveTab === 'index') renderColumnsModalIndexTab();
+  else if (columnsModalActiveTab === 'computed') renderColumnsModalComputedTab();
+  else if (columnsModalActiveTab === 'format') renderColumnsModalFormatTab();
+}
+
+// ---------- Onglet Colonne ----------
+
+document.getElementById('selectColumnsModalNewColType').innerHTML = columnTypeOptionsHtml();
+
+document.getElementById('columnsModalColumnSelect').addEventListener('change', (e) => {
+  columnsModalSelectedColumn = e.target.value;
+  renderColumnsModalColumnTab();
+});
+
+async function populateColumnsModalRelationSelects(refTableName, selectedRefColumn, selectedRefDisplay) {
+  const refColSelect = document.getElementById('selectColumnsModalRefColumn');
+  const refDisplaySelect = document.getElementById('selectColumnsModalRefDisplay');
+  if (!refTableName) {
+    refColSelect.innerHTML = '';
+    refDisplaySelect.innerHTML = '';
+    return;
+  }
+  const data = await columnsModalRequest(`/api/${currentDb.id}/${refTableName}`);
+  const optionsHtml = (data.columns || []).map(c => `<option value="${escapeHtml(c)}">${escapeHtml(c)}</option>`).join('');
+  refColSelect.innerHTML = optionsHtml;
+  refDisplaySelect.innerHTML = optionsHtml;
+  if (selectedRefColumn) refColSelect.value = selectedRefColumn;
+  if (selectedRefDisplay) refDisplaySelect.value = selectedRefDisplay;
+}
+
+function renderColumnsModalColumnTab() {
+  const select = document.getElementById('columnsModalColumnSelect');
+  const cols = realColumns();
+  if (!cols.includes(columnsModalSelectedColumn)) columnsModalSelectedColumn = cols[0] || null;
+  select.innerHTML = cols.map(c => `<option value="${escapeHtml(c)}"${c === columnsModalSelectedColumn ? ' selected' : ''}>${escapeHtml(c)}</option>`).join('');
+
+  const body = document.getElementById('columnsModalColumnBody');
+  const col = columnsModalSelectedColumn;
+  if (!col) {
+    body.innerHTML = '<p class="columns-modal-empty">Aucune colonne à gérer.</p>';
+    return;
+  }
+
+  const relation = (currentTableData.relations || []).find(r => r.column === col);
+  const validation = (currentTableData.columnValidation && currentTableData.columnValidation[col]) || {};
+  const otherTables = (currentDb.tables || []).filter(t => t.name !== currentTable.name);
+
+  body.innerHTML = `
+    <div class="columns-modal-section">
+      <div class="columns-modal-row columns-modal-row-wrap">
+        <input type="text" id="inputColumnsModalRename" value="${escapeHtml(col)}">
+        <button type="button" class="btn-secondary" id="btnColumnsModalRename">Renommer</button>
+        <button type="button" class="btn-danger" id="btnColumnsModalDelete">🗑 Supprimer la colonne</button>
+      </div>
+    </div>
+
+    <div class="columns-modal-section">
+      <div class="columns-modal-section-title">Liaison</div>
+      <div class="columns-modal-row columns-modal-row-wrap">
+        <select id="selectColumnsModalRefTable">
+          <option value="">— aucune —</option>
+          ${otherTables.map(t => `<option value="${escapeHtml(t.name)}"${relation && relation.refTable === t.name ? ' selected' : ''}>${escapeHtml(t.name)}</option>`).join('')}
+        </select>
+        <select id="selectColumnsModalRefColumn"></select>
+        <select id="selectColumnsModalRefDisplay"></select>
+        <label class="checkbox-inline"><input type="checkbox" id="checkboxColumnsModalCascade" ${relation && relation.cascade ? 'checked' : ''}> Cascade</label>
+        <button type="button" class="btn-secondary" id="btnColumnsModalSaveRelation">${relation ? 'Mettre à jour' : 'Lier'}</button>
+        ${relation ? '<button type="button" class="btn-danger" id="btnColumnsModalRemoveRelation">Supprimer la liaison</button>' : ''}
+      </div>
+    </div>
+
+    <div class="columns-modal-section">
+      <div class="columns-modal-section-title">Validation</div>
+      <div class="columns-modal-row columns-modal-row-wrap">
+        <label class="checkbox-inline"><input type="checkbox" id="checkboxColumnsModalRequired" ${validation.required ? 'checked' : ''}> Obligatoire</label>
+        <input type="number" id="inputColumnsModalMin" placeholder="min" value="${validation.min ?? ''}">
+        <input type="number" id="inputColumnsModalMax" placeholder="max" value="${validation.max ?? ''}">
+        <input type="text" id="inputColumnsModalPattern" placeholder="motif (regex)" value="${escapeHtml(validation.pattern ?? '')}">
+        <input type="text" id="inputColumnsModalDefault" placeholder="valeur par défaut" value="${escapeHtml(validation.defaultValue ?? '')}">
+        <button type="button" class="btn-secondary" id="btnColumnsModalSaveValidation">Enregistrer</button>
+      </div>
+    </div>
+
+    <p class="form-error" id="errorColumnsModalColumn"></p>
+  `;
+
+  wireColumnsModalColumnTab(col, relation);
+}
+
+function wireColumnsModalColumnTab(col, relation) {
+  const errorEl = document.getElementById('errorColumnsModalColumn');
+
+  document.getElementById('btnColumnsModalRename').addEventListener('click', async () => {
+    const newName = document.getElementById('inputColumnsModalRename').value.trim();
+    if (!newName || newName === col) return;
+    errorEl.textContent = '';
+    try {
+      await columnsModalRequest(`/api/${currentDb.id}/${currentTable.name}/columns/${col}`, {
+        method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ newName })
+      });
+      columnsModalSelectedColumn = newName;
+      await refreshColumnsModal();
+      showToast('Colonne renommée.', 'success');
+    } catch (err) { errorEl.textContent = err.message; }
+  });
+
+  document.getElementById('btnColumnsModalDelete').addEventListener('click', async () => {
+    const confirmed = await showConfirm(`Supprimer définitivement la colonne « ${col} » ?`, 'Supprimer la colonne');
+    if (!confirmed) return;
+    try {
+      await columnsModalRequest(`/api/${currentDb.id}/${currentTable.name}/columns/${col}`, { method: 'DELETE' });
+      columnsModalSelectedColumn = null;
+      await refreshColumnsModal();
+      showToast('Colonne supprimée.', 'success');
+    } catch (err) { errorEl.textContent = err.message; }
+  });
+
+  populateColumnsModalRelationSelects(document.getElementById('selectColumnsModalRefTable').value, relation?.refColumn, relation?.refDisplay);
+  document.getElementById('selectColumnsModalRefTable').addEventListener('change', (e) => {
+    populateColumnsModalRelationSelects(e.target.value);
+  });
+
+  document.getElementById('btnColumnsModalSaveRelation').addEventListener('click', async () => {
+    errorEl.textContent = '';
+    const refTable = document.getElementById('selectColumnsModalRefTable').value;
+    if (!refTable) { errorEl.textContent = 'Choisissez une table à lier.'; return; }
+    const refColumn = document.getElementById('selectColumnsModalRefColumn').value;
+    const refDisplay = document.getElementById('selectColumnsModalRefDisplay').value;
+    const cascade = document.getElementById('checkboxColumnsModalCascade').checked;
+    try {
+      await columnsModalRequest(`/api/${currentDb.id}/${currentTable.name}/columns/${col}/relation`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ refTable, refColumn, refDisplay, cascade })
+      });
+      await refreshColumnsModal();
+      showToast('Liaison enregistrée.', 'success');
+    } catch (err) { errorEl.textContent = err.message; }
+  });
+
+  const removeRelationBtn = document.getElementById('btnColumnsModalRemoveRelation');
+  if (removeRelationBtn) {
+    removeRelationBtn.addEventListener('click', async () => {
+      errorEl.textContent = '';
+      try {
+        await columnsModalRequest(`/api/${currentDb.id}/${currentTable.name}/columns/${col}/relation`, { method: 'DELETE' });
+        await refreshColumnsModal();
+        showToast('Liaison supprimée.', 'success');
+      } catch (err) { errorEl.textContent = err.message; }
+    });
+  }
+
+  document.getElementById('btnColumnsModalSaveValidation').addEventListener('click', async () => {
+    errorEl.textContent = '';
+    const body = {
+      required: document.getElementById('checkboxColumnsModalRequired').checked,
+      min: document.getElementById('inputColumnsModalMin').value,
+      max: document.getElementById('inputColumnsModalMax').value,
+      pattern: document.getElementById('inputColumnsModalPattern').value,
+      defaultValue: document.getElementById('inputColumnsModalDefault').value,
+    };
+    try {
+      await columnsModalRequest(`/api/${currentDb.id}/${currentTable.name}/columns/${col}/validation`, {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+      });
+      await refreshColumnsModal();
+      showToast('Validation enregistrée.', 'success');
+    } catch (err) { errorEl.textContent = err.message; }
+  });
+}
+
+document.getElementById('formColumnsModalAddColumn').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const errorEl = document.getElementById('errorColumnsModalAddColumn');
+  errorEl.textContent = '';
+  const name = document.getElementById('inputColumnsModalNewColName').value.trim();
+  if (!name) return;
+  const choice = resolveColumnChoice(document.getElementById('selectColumnsModalNewColType').value);
+  try {
+    await columnsModalRequest(`/api/${currentDb.id}/${currentTable.name}/columns`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, type: choice.type, kind: choice.kind })
+    });
+    e.target.reset();
+    columnsModalSelectedColumn = name;
+    await refreshColumnsModal();
+    showToast('Colonne ajoutée.', 'success');
+  } catch (err) { errorEl.textContent = err.message; }
+});
+
+// ---------- Onglet Index ----------
+
+function renderColumnsModalIndexTab() {
+  const list = document.getElementById('columnsModalIndexList');
+  const indexes = currentTableData.indexes || [];
+  list.innerHTML = indexes.length === 0
+    ? '<p class="columns-modal-empty">Aucun index.</p>'
+    : indexes.map(idx => `
+      <div class="columns-modal-list-item">
+        <span>${escapeHtml(idx.name)}${idx.unique ? ' <em>(unique)</em>' : ''} — ${idx.columns.map(escapeHtml).join(', ')}</span>
+        <button type="button" class="btn-remove-col btn-columns-modal-remove-index" data-index-name="${escapeHtml(idx.name)}" title="Supprimer">×</button>
+      </div>`).join('');
+
+  list.querySelectorAll('.btn-columns-modal-remove-index').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      try {
+        await columnsModalRequest(`/api/${currentDb.id}/${currentTable.name}/indexes/${btn.dataset.indexName}`, { method: 'DELETE' });
+        await refreshColumnsModal();
+        showToast('Index supprimé.', 'success');
+      } catch (err) { showToast(err.message, 'error'); }
+    });
+  });
+
+  document.getElementById('columnsModalIndexCheckboxes').innerHTML = realColumns().map(c => `
+    <label class="checkbox-inline"><input type="checkbox" class="columns-modal-index-col-checkbox" value="${escapeHtml(c)}"> ${escapeHtml(c)}</label>
+  `).join('');
+}
+
+document.getElementById('formColumnsModalAddIndex').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const errorEl = document.getElementById('errorColumnsModalAddIndex');
+  errorEl.textContent = '';
+  const columns = Array.from(document.querySelectorAll('.columns-modal-index-col-checkbox:checked')).map(cb => cb.value);
+  const unique = document.getElementById('checkboxColumnsModalIndexUnique').checked;
+  if (columns.length === 0) { errorEl.textContent = 'Choisissez au moins une colonne.'; return; }
+  try {
+    await columnsModalRequest(`/api/${currentDb.id}/${currentTable.name}/indexes`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ columns, unique })
+    });
+    e.target.reset();
+    await refreshColumnsModal();
+    showToast('Index créé.', 'success');
+  } catch (err) { errorEl.textContent = err.message; }
+});
+
+// ---------- Onglet Champs calculés ----------
+
+document.getElementById('selectComputedRefTable').addEventListener('change', async (e) => {
+  const refColSelect = document.getElementById('selectComputedRefColumn');
+  if (!e.target.value) { refColSelect.innerHTML = ''; return; }
+  const data = await columnsModalRequest(`/api/${currentDb.id}/${e.target.value}`);
+  refColSelect.innerHTML = (data.columns || []).map(c => `<option value="${escapeHtml(c)}">${escapeHtml(c)}</option>`).join('');
+});
+
+function renderColumnsModalComputedTab() {
+  const computedCols = (currentTableData.columns || []).filter(c => currentTableData.columnKinds && currentTableData.columnKinds[c] === 'computed');
+  const computedList = document.getElementById('columnsModalComputedList');
+  computedList.innerHTML = computedCols.length === 0
+    ? '<p class="columns-modal-empty">Aucun champ calculé.</p>'
+    : computedCols.map(c => `
+      <div class="columns-modal-list-item">
+        <span>${escapeHtml(c)}</span>
+        <button type="button" class="btn-remove-col btn-columns-modal-remove-computed" data-col="${escapeHtml(c)}" title="Supprimer">×</button>
+      </div>`).join('');
+  computedList.querySelectorAll('.btn-columns-modal-remove-computed').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      try {
+        await columnsModalRequest(`/api/${currentDb.id}/${currentTable.name}/computed-columns/${btn.dataset.col}`, { method: 'DELETE' });
+        await refreshColumnsModal();
+        showToast('Champ calculé supprimé.', 'success');
+      } catch (err) { showToast(err.message, 'error'); }
+    });
+  });
+
+  const formulaCols = Object.entries(currentTableData.formulas || {});
+  const formulaList = document.getElementById('columnsModalFormulaList');
+  formulaList.innerHTML = formulaCols.length === 0
+    ? '<p class="columns-modal-empty">Aucun champ formule.</p>'
+    : formulaCols.map(([name, def]) => `
+      <div class="columns-modal-list-item">
+        <span>${escapeHtml(name)} = ${escapeHtml(def.expression)}</span>
+        <button type="button" class="btn-remove-col btn-columns-modal-remove-formula" data-col="${escapeHtml(name)}" title="Supprimer">×</button>
+      </div>`).join('');
+  formulaList.querySelectorAll('.btn-columns-modal-remove-formula').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      try {
+        await columnsModalRequest(`/api/${currentDb.id}/${currentTable.name}/formula-columns/${btn.dataset.col}`, { method: 'DELETE' });
+        await refreshColumnsModal();
+        showToast('Champ formule supprimé.', 'success');
+      } catch (err) { showToast(err.message, 'error'); }
+    });
+  });
+
+  document.getElementById('selectComputedSourceColumn').innerHTML = realColumns().map(c => `<option value="${escapeHtml(c)}">${escapeHtml(c)}</option>`).join('');
+
+  const refTableSelect = document.getElementById('selectComputedRefTable');
+  const otherTables = (currentDb.tables || []).filter(t => t.name !== currentTable.name);
+  refTableSelect.innerHTML = '<option value="">— table —</option>' + otherTables.map(t => `<option value="${escapeHtml(t.name)}">${escapeHtml(t.name)}</option>`).join('');
+  document.getElementById('selectComputedRefColumn').innerHTML = '';
+}
+
+document.getElementById('formColumnsModalAddComputed').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const errorEl = document.getElementById('errorColumnsModalAddComputed');
+  errorEl.textContent = '';
+  const name = document.getElementById('inputComputedName').value.trim();
+  const sourceColumn = document.getElementById('selectComputedSourceColumn').value;
+  const refTable = document.getElementById('selectComputedRefTable').value;
+  const refColumn = document.getElementById('selectComputedRefColumn').value;
+  if (!name || !sourceColumn || !refTable || !refColumn) { errorEl.textContent = 'Tous les champs sont requis.'; return; }
+  try {
+    await columnsModalRequest(`/api/${currentDb.id}/${currentTable.name}/computed-columns`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, sourceColumn, refTable, refColumn })
+    });
+    e.target.reset();
+    document.getElementById('selectComputedRefColumn').innerHTML = '';
+    await refreshColumnsModal();
+    showToast('Champ calculé ajouté.', 'success');
+  } catch (err) { errorEl.textContent = err.message; }
+});
+
+document.getElementById('formColumnsModalAddFormula').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const errorEl = document.getElementById('errorColumnsModalAddFormula');
+  errorEl.textContent = '';
+  const name = document.getElementById('inputFormulaName').value.trim();
+  const expression = document.getElementById('inputFormulaExpression').value.trim();
+  if (!name || !expression) return;
+  try {
+    await columnsModalRequest(`/api/${currentDb.id}/${currentTable.name}/formula-columns`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, expression })
+    });
+    e.target.reset();
+    await refreshColumnsModal();
+    showToast('Champ formule ajouté.', 'success');
+  } catch (err) { errorEl.textContent = err.message; }
+});
+
+// ---------- Onglet Mise en forme ----------
+
+document.getElementById('selectFormatOperator').innerHTML =
+  Object.entries(FORMAT_OPERATOR_LABELS).map(([key, label]) => `<option value="${key}">${escapeHtml(label)}</option>`).join('');
+
+function renderColumnsModalFormatTab() {
+  const rules = currentTableData.conditionalFormats || [];
+  const list = document.getElementById('columnsModalFormatList');
+  list.innerHTML = rules.length === 0
+    ? '<p class="columns-modal-empty">Aucune règle de mise en forme.</p>'
+    : rules.map(r => `
+      <div class="columns-modal-list-item">
+        <span><span class="format-swatch" style="background:${escapeHtml(r.color)}"></span>${escapeHtml(r.column)} ${escapeHtml(FORMAT_OPERATOR_LABELS[r.operator] || r.operator)} « ${escapeHtml(r.value ?? '')} » — ${r.target === 'row' ? 'ligne' : 'cellule'}</span>
+        <button type="button" class="btn-remove-col btn-columns-modal-remove-format" data-rule-id="${escapeHtml(r.id)}" title="Supprimer">×</button>
+      </div>`).join('');
+  list.querySelectorAll('.btn-columns-modal-remove-format').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      try {
+        await columnsModalRequest(`/api/${currentDb.id}/${currentTable.name}/conditional-formats/${btn.dataset.ruleId}`, { method: 'DELETE' });
+        await refreshColumnsModal();
+        showToast('Règle supprimée.', 'success');
+      } catch (err) { showToast(err.message, 'error'); }
+    });
+  });
+
+  document.getElementById('selectFormatColumn').innerHTML = (currentTableData.columns || []).filter(c => c !== 'id')
+    .map(c => `<option value="${escapeHtml(c)}">${escapeHtml(c)}</option>`).join('');
+}
+
+document.getElementById('formColumnsModalAddFormat').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const errorEl = document.getElementById('errorColumnsModalAddFormat');
+  errorEl.textContent = '';
+  const column = document.getElementById('selectFormatColumn').value;
+  const operator = document.getElementById('selectFormatOperator').value;
+  const value = document.getElementById('inputFormatValue').value;
+  const color = document.getElementById('inputFormatColor').value;
+  const target = document.getElementById('selectFormatTarget').value;
+  if (!column) { errorEl.textContent = 'Choisissez une colonne.'; return; }
+  try {
+    await columnsModalRequest(`/api/${currentDb.id}/${currentTable.name}/conditional-formats`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ column, operator, value, color, target })
+    });
+    document.getElementById('inputFormatValue').value = '';
+    await refreshColumnsModal();
+    showToast('Règle ajoutée.', 'success');
+  } catch (err) { errorEl.textContent = err.message; }
+});
+
+// =========================================================================
 // RECHERCHE GLOBALE — cherche dans toutes les tables de la base courante
 // =========================================================================
 
@@ -2868,6 +3341,24 @@ enableDragReorder(document.getElementById('tabs'), '.tab:not(.tab-add)', 'horizo
 
 enableDragReorder(document.getElementById('columnsList'), '.column-row', 'vertical', () => {});
 
+// glisser un en-tête de colonne pour réordonner la grille ; enregistré une fois
+// sur #content (persiste à travers les re-rendus) comme pour dbList/tabs ci-dessus
+enableDragReorder(document.getElementById('content'), 'th.sortable', 'horizontal', (items) => {
+  if (!currentDb || !currentTable) return;
+  // la colonne épinglée (non draggable) reste dans `items` comme cible de dépôt
+  // possible ; peu importe sa position ici, renderContent() la replace toujours
+  // en tête indépendamment de l'ordre sauvegardé (voir orderedColumns)
+  const orderedNames = items.map(el => el.dataset.column);
+  currentTableData.columns = orderedNames;
+  renderContent();
+
+  fetch(`/api/${currentDb.id}/${currentTable.name}/columns/order`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ orderedNames })
+  }).catch(err => console.error('Échec sauvegarde ordre des colonnes :', err));
+});
+
 const sidebar = document.getElementById('sidebar');
 const sidebarBackdrop = document.getElementById('sidebarBackdrop');
 const btnSidebarToggle = document.getElementById('btnSidebarToggle');
@@ -2885,6 +3376,32 @@ if (localStorage.getItem('sidebarCollapsed') === '1') {
 
 btnSidebarToggle.addEventListener('click', () => {
   setSidebarCollapsed(!sidebar.classList.contains('collapsed'));
+});
+
+// =========================================================================
+// THÈME CLAIR/SOMBRE — appliqué tôt dans <head> (voir le script inline
+// anti-flash) ; ici on ne fait que synchroniser le bouton et gérer le clic
+// =========================================================================
+
+const btnThemeToggle = document.getElementById('btnThemeToggle');
+
+function updateThemeToggleLabel() {
+  const isLight = document.documentElement.getAttribute('data-theme') === 'light';
+  btnThemeToggle.textContent = isLight ? '☀️ Thème clair' : '🌙 Thème sombre';
+}
+
+updateThemeToggleLabel();
+
+btnThemeToggle.addEventListener('click', () => {
+  const isLight = document.documentElement.getAttribute('data-theme') === 'light';
+  if (isLight) {
+    document.documentElement.removeAttribute('data-theme');
+    localStorage.setItem('theme', 'dark');
+  } else {
+    document.documentElement.setAttribute('data-theme', 'light');
+    localStorage.setItem('theme', 'light');
+  }
+  updateThemeToggleLabel();
 });
 
 // =========================================================================
@@ -2989,6 +3506,37 @@ document.getElementById('btnLogout').addEventListener('click', async () => {
     // ignore, on redirige quand même vers la page de connexion
   }
   window.location.href = '/login.html';
+});
+
+// =========================================================================
+// RACCOURCIS CLAVIER — Ctrl/Cmd+F (recherche), Échap (ferme la modale
+// ouverte). Pas de navigation aux flèches entre cellules : elles doivent
+// rester disponibles pour déplacer le curseur texte dans une cellule
+// contenteditable en cours d'édition (voir Entrée/Maj+Entrée plus haut,
+// dans le handler keydown de td.editable, pour la navigation ligne à ligne).
+// =========================================================================
+
+document.addEventListener('keydown', (e) => {
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'f') {
+    const active = document.activeElement;
+    const searchInput = document.getElementById('searchInput');
+    const isEditingElsewhere = active && active !== searchInput &&
+      (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || active.isContentEditable);
+    if (isEditingElsewhere) return; // laisse le raccourci natif du champ/cellule en cours d'édition
+
+    e.preventDefault();
+    searchInput.focus();
+    searchInput.select();
+    return;
+  }
+
+  if (e.key === 'Escape') {
+    // déclenche le clic sur l'overlay de chaque modale ouverte : tous les
+    // idiomes existants ("if (e.target === modalX) closeX()") s'appliquent
+    // sans dupliquer la logique de fermeture — important pour modalConfirm/
+    // showConfirm() en particulier, qui résout une Promise en attente
+    document.querySelectorAll('.modal-overlay.open').forEach(m => m.click());
+  }
 });
 
 async function checkAuthThenInit() {

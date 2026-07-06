@@ -8,6 +8,7 @@ const {
   deleteDatabase,
   reorderDatabases,
   reorderTables,
+  reorderColumns,
   setNodePosition,
   setNodePositions,
   setPinnedColumn,
@@ -255,6 +256,21 @@ router.post('/:dbId/:tableName/columns', (req, res) => {
     }
     const column = addColumn(dbId, tableName, { name: name.trim(), type, kind });
     res.status(201).json(column);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// PUT /api/:dbId/:tableName/columns/order  { orderedNames: [...] } -> sauvegarde l'ordre d'affichage des colonnes
+router.put('/:dbId/:tableName/columns/order', (req, res) => {
+  try {
+    const { dbId, tableName } = req.params;
+    const { orderedNames } = req.body;
+    if (!Array.isArray(orderedNames)) {
+      return res.status(400).json({ error: 'orderedNames doit être un tableau.' });
+    }
+    reorderColumns(dbId, tableName, orderedNames);
+    res.json({ success: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
