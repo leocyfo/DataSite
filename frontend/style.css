@@ -136,8 +136,7 @@ textarea:focus-visible{
 .sidebar.collapsed .db-item-right,
 .sidebar.collapsed .label-text,
 .sidebar.collapsed .sidebar-footer,
-.sidebar.collapsed .btn-theme-toggle,
-.sidebar.collapsed .btn-logout{
+.sidebar.collapsed .btn-theme-toggle{
   display: none;
 }
 
@@ -1135,8 +1134,7 @@ tbody tr:hover .col-pinned{
   .sidebar.collapsed .db-item-right,
   .sidebar.collapsed .label-text,
   .sidebar.collapsed .sidebar-footer,
-  .sidebar.collapsed .btn-theme-toggle,
-  .sidebar.collapsed .btn-logout{
+  .sidebar.collapsed .btn-theme-toggle{
     display: revert;
   }
 
@@ -1248,6 +1246,10 @@ tbody tr:hover .col-pinned{
 .btn-toolbar:active:not(:disabled){
   transform: scale(0.96);
 }
+
+/* le bouton "Retour au hub" est un <a>, pas un <button> — annule le
+   soulignement par défaut des liens pour qu'il se fonde dans la barre d'outils */
+.btn-toolbar[href]{ text-decoration: none; display: inline-flex; align-items: center; }
 
 .toolbar-inner-divider{
   width: 1px;
@@ -1996,6 +1998,41 @@ textarea.row-detail-input{
   width: 640px;
 }
 
+.saved-queries-list{
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+.saved-queries-list:empty{ display: none; margin: 0; }
+
+.saved-query-chip{
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 3px 4px 3px 10px;
+  font-size: 12px;
+}
+
+.saved-query-name{ cursor: pointer; color: var(--text); }
+.saved-query-name:hover{ color: var(--accent); }
+
+.saved-query-delete{
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 11px;
+  padding: 2px 5px;
+  border-radius: 50%;
+}
+
+.saved-query-delete:hover{ background: var(--danger-soft); color: var(--danger); }
+
 .query-textarea{
   width: 100%;
   background: var(--bg);
@@ -2415,94 +2452,6 @@ body.graph-connecting .graph-canvas{
   cursor: crosshair;
 }
 
-/* ---------- PAGE DE CONNEXION ---------- */
-.login-screen{
-  display:flex;
-  align-items:center;
-  justify-content:center;
-  height:100vh;
-  background: var(--bg);
-}
-
-.login-card{
-  width: 340px;
-  max-width: 90vw;
-  padding: 32px 28px;
-  background: var(--panel);
-  border: 1px solid var(--border);
-  border-radius: 12px;
-}
-
-.login-logo{
-  display:flex;
-  align-items:center;
-  gap:8px;
-  font-family: var(--font-mono);
-  font-weight:700;
-  font-size:15px;
-  letter-spacing:0.5px;
-  margin-bottom: 20px;
-}
-
-.login-logo .dot{
-  width:8px; height:8px; border-radius:50%;
-  background:var(--ok);
-  box-shadow:0 0 8px var(--ok);
-}
-
-.login-card h2{
-  font-size: 16px;
-  font-weight: 700;
-  margin-bottom: 8px;
-}
-
-.login-subtitle{
-  font-size: 12.5px;
-  color: var(--text-dim);
-  line-height: 1.5;
-  margin-bottom: 20px;
-}
-
-.login-card form{
-  display:flex;
-  flex-direction:column;
-  gap: 14px;
-}
-
-.login-card label{
-  display:flex;
-  flex-direction:column;
-  gap: 6px;
-  font-size: 12px;
-  color: var(--text-dim);
-  font-weight: 600;
-}
-
-.login-card label[hidden]{
-  display:none;
-}
-
-.login-card input[type="password"]{
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 9px 10px;
-  color: var(--text);
-  font-family: var(--font-mono);
-  font-size: 13px;
-  outline: none;
-  transition: border-color 0.15s ease;
-}
-
-.login-card input[type="password"]:focus{
-  border-color: var(--accent-dim);
-}
-
-.login-card .btn-primary{
-  width: 100%;
-  padding: 10px 16px;
-}
-
 /* ---------- THÈME CLAIR/SOMBRE ---------- */
 .btn-theme-toggle{
   background: transparent;
@@ -2522,23 +2471,6 @@ body.graph-connecting .graph-canvas{
 .btn-theme-toggle:hover{
   color: var(--text);
   border-color: var(--text-dim);
-}
-
-/* ---------- DÉCONNEXION ---------- */
-.btn-logout{
-  background: transparent;
-  border: none;
-  color: var(--text-dim);
-  font-size: 11px;
-  font-family: var(--font-mono);
-  cursor: pointer;
-  padding: 0;
-  text-decoration: underline;
-  margin-top: 4px;
-}
-
-.btn-logout:hover{
-  color: var(--danger);
 }
 
 /* ---------- MODALE COLONNES ---------- */

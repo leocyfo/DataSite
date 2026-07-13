@@ -1,13 +1,10 @@
-// redirige vers la page de connexion si la session expire pendant l'usage de l'app
-const nativeFetch = window.fetch;
-window.fetch = async (...args) => {
-  const response = await nativeFetch(...args);
-  const url = String(args[0]);
-  if (response.status === 401 && !url.includes('/api/auth/')) {
-    window.location.href = '/login.html';
-  }
-  return response;
-};
+// force un rechargement complet si la page est restaurée depuis le cache
+// arrière du navigateur (bfcache) — sans ça, un retour en arrière depuis un
+// autre outil peut réafficher un état JS/DOM figé au moment du départ,
+// potentiellement très en retard sur ce que le serveur sert réellement
+window.addEventListener('pageshow', (event) => {
+  if (event.persisted) location.reload();
+});
 
 function escapeHtml(value) {
   return String(value ?? '')
@@ -151,7 +148,15 @@ function showConfirm(message, title = 'Confirmer') {
 let databases = [];
 let currentDb = null;
 let currentTable = null;
+// lien direct depuis le hub (?db=<id>) : n'est pris en compte qu'au tout
+// premier chargement, puis vidé — une action utilisateur ultérieure (choisir
+// une autre base) ne doit jamais être re-écrasée par ce paramètre d'URL
+let pendingDeepLinkDbId = new URLSearchParams(location.search).get('db');
 let currentTableData = { columns: [], columnTypes: {}, rows: [] };
+// dernière signature d'avertissements déjà affichée (colonnes calculées/
+// formule masquées) — évite de re-toaster le même avertissement à chaque
+// rafraîchissement silencieux de la table (voir loadTableData)
+let lastWarningsSignature = '';
 let searchQuery = '';
 let sortState = { column: null, dir: 'asc' };
 let currentPage = 1;
@@ -256,16 +261,19 @@ function getDisplayRows() {
 }
 
 async function loadDatabases() {
-  const res = await fetch('/api/databases');
+  const res = await fetch('api/databases');
   databases = await res.json();
 
   document.getElementById('sidebarFooter').innerHTML =
     `Node.js · SQLite<br>${databases.length} base${databases.length === 1 ? '' : 's'} connectée${databases.length === 1 ? '' : 's'}`;
 
   if (databases.length > 0) {
+    const deepLinkDb = pendingDeepLinkDbId && databases.find(d => d.id === pendingDeepLinkDbId);
+    pendingDeepLinkDbId = null;
+
     // garde la base sélectionnée si elle existe encore, sinon prend la première
     const stillExistsDb = currentDb && databases.find(d => d.id === currentDb.id);
-    currentDb = stillExistsDb ? databases.find(d => d.id === currentDb.id) : databases[0];
+    currentDb = deepLinkDb || (stillExistsDb ? databases.find(d => d.id === currentDb.id) : databases[0]);
 
     // garde la table sélectionnée si elle existe encore, sinon prend la première
     const stillExistsTable = currentTable && currentDb.tables.find(t => t.name === currentTable.name);
@@ -285,8 +293,15 @@ async function loadTableData() {
     currentTableData = { columns: [], columnTypes: {}, rows: [] };
     return;
   }
-  const res = await fetch(`/api/${currentDb.id}/${currentTable.name}`);
+  const res = await fetch(`api/${currentDb.id}/${currentTable.name}`);
   currentTableData = await res.json();
+
+  const warnings = currentTableData.warnings || [];
+  const signature = `${currentDb.id}/${currentTable.name}:${warnings.join('\n')}`;
+  if (warnings.length && signature !== lastWarningsSignature) {
+    warnings.forEach(w => showToast(w, 'error'));
+  }
+  lastWarningsSignature = signature;
 }
 
 function enableDragReorder(container, itemSelector, direction, onDrop) {
@@ -363,7 +378,7 @@ function renderSidebar() {
     li.querySelector('.btn-export-db').addEventListener('click', (e) => {
       e.stopPropagation();
       const a = document.createElement('a');
-      a.href = `/api/databases/${db.id}/backup`;
+      a.href = `api/databases/${db.id}/backup`;
       a.click();
     });
 
@@ -373,7 +388,7 @@ function renderSidebar() {
       if (!newName || !newName.trim() || newName.trim() === db.name) return;
 
       try {
-        const res = await fetch(`/api/databases/${db.id}`, {
+        const res = await fetch(`api/databases/${db.id}`, {
           method: 'PATCH',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ name: newName.trim() })
@@ -394,7 +409,7 @@ function renderSidebar() {
       if (!confirmed) return;
 
       try {
-        const res = await fetch(`/api/databases/${db.id}`, { method: 'DELETE' });
+        const res = await fetch(`api/databases/${db.id}`, { method: 'DELETE' });
         if (!res.ok) {
           const data = await res.json().catch(() => ({}));
           throw new Error(data.error || 'Échec de la suppression');
@@ -472,7 +487,7 @@ function renderTabs() {
       if (!newName || !newName.trim() || newName.trim() === table.name) return;
 
       try {
-        const res = await fetch(`/api/${currentDb.id}/tables/${table.name}`, {
+        const res = await fetch(`api/${currentDb.id}/tables/${table.name}`, {
           method: 'PATCH',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ newName: newName.trim() })
@@ -500,7 +515,7 @@ function renderTabs() {
       if (!confirmed) return;
 
       try {
-        const res = await fetch(`/api/${currentDb.id}/tables/${table.name}`, { method: 'DELETE' });
+        const res = await fetch(`api/${currentDb.id}/tables/${table.name}`, { method: 'DELETE' });
         if (!res.ok) {
           const data = await res.json().catch(() => ({}));
           throw new Error(data.error || 'Échec de la suppression');
@@ -575,7 +590,7 @@ btnViewGraph.addEventListener('click', () => {
 // pour avertir avant une suppression qui laisserait des liaisons orphelines
 async function fetchRowReferences(dbId, tableName, rowId) {
   try {
-    const res = await fetch(`/api/${dbId}/${tableName}/${rowId}/references`);
+    const res = await fetch(`api/${dbId}/${tableName}/${rowId}/references`);
     return res.ok ? await res.json() : [];
   } catch {
     return [];
@@ -584,7 +599,7 @@ async function fetchRowReferences(dbId, tableName, rowId) {
 
 async function fetchTableReferences(dbId, tableName) {
   try {
-    const res = await fetch(`/api/${dbId}/tables/${tableName}/references`);
+    const res = await fetch(`api/${dbId}/tables/${tableName}/references`);
     return res.ok ? await res.json() : [];
   } catch {
     return [];
@@ -614,7 +629,7 @@ function formatTableReferenceLines(refs) {
 
 // sauvegarde la valeur d'une cellule et alimente la pile d'annulation ; lève en cas d'échec
 async function saveCellValue(rowId, column, newValue, oldValue) {
-  const res = await fetch(`/api/${currentDb.id}/${currentTable.name}/${rowId}`, {
+  const res = await fetch(`api/${currentDb.id}/${currentTable.name}/${rowId}`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ [column]: newValue === '' ? null : newValue })
@@ -628,6 +643,17 @@ async function saveCellValue(rowId, column, newValue, oldValue) {
   redoStack = [];
   updateUndoButton();
   updateRedoButton();
+
+  // les colonnes calculées/formule peuvent dépendre de la colonne qu'on
+  // vient d'éditer — sans ce rafraîchissement elles restent périmées
+  // jusqu'à changer de table puis y revenir. Guard sur la présence de
+  // colonnes dérivées pour ne pas payer ce coût sur une table qui n'en a pas
+  const kinds = currentTableData.columnKinds || {};
+  const hasDerived = Object.values(kinds).some(k => k === 'computed' || k === 'formula');
+  if (hasDerived) {
+    await loadTableData();
+    renderContent();
+  }
 }
 
 function renderContent() {
@@ -831,7 +857,7 @@ function renderContent() {
       const col = btn.dataset.column;
       const newPinned = col === pinnedCol ? null : col;
       try {
-        const res = await fetch(`/api/${currentDb.id}/${currentTable.name}/pinned-column`, {
+        const res = await fetch(`api/${currentDb.id}/${currentTable.name}/pinned-column`, {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ column: newPinned })
@@ -896,7 +922,7 @@ function renderContent() {
       if (!confirmed) return;
 
       try {
-        const res = await fetch(`/api/${currentDb.id}/${currentTable.name}/${rowId}`, { method: 'DELETE' });
+        const res = await fetch(`api/${currentDb.id}/${currentTable.name}/${rowId}`, { method: 'DELETE' });
         if (!res.ok) {
           const data = await res.json().catch(() => ({}));
           throw new Error(data.error || 'Échec de la suppression');
@@ -1070,7 +1096,7 @@ function renderContent() {
       });
 
       try {
-        const res = await fetch(`/api/${currentDb.id}/${currentTable.name}`, {
+        const res = await fetch(`api/${currentDb.id}/${currentTable.name}`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(data)
@@ -1157,7 +1183,7 @@ function renderTotalsBar(rows) {
 // enregistre la fonction d'agrégat d'une colonne (appelé depuis la barre ou la modale) ;
 // lève en cas d'échec pour laisser chaque appelant décider de son propre retour visuel
 async function saveColumnTotal(col, fn) {
-  const res = await fetch(`/api/${currentDb.id}/${currentTable.name}/columns/${col}/total`, {
+  const res = await fetch(`api/${currentDb.id}/${currentTable.name}/columns/${col}/total`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ fn: fn || null })
@@ -1192,9 +1218,9 @@ const GRAPH_ZOOM_STEP = 0.15;
 async function loadGraphData(dbId) {
   const tables = currentDb.tables;
   const [relations, schemaEntries] = await Promise.all([
-    fetch(`/api/${dbId}/relations`).then(r => r.ok ? r.json() : []),
+    fetch(`api/${dbId}/relations`).then(r => r.ok ? r.json() : []),
     Promise.all(tables.map(t =>
-      fetch(`/api/${dbId}/${t.name}`)
+      fetch(`api/${dbId}/${t.name}`)
         .then(r => r.ok ? r.json() : { columns: [], columnTypes: {}, columnKinds: {} })
         .then(data => [t.name, { columns: data.columns || [], columnTypes: data.columnTypes || {}, columnKinds: data.columnKinds || {} }])
     )),
@@ -1314,7 +1340,7 @@ async function ensureAutoLayout(force) {
   currentDb.nodePositions = { ...existing, ...toSave };
 
   try {
-    await fetch(`/api/${currentDb.id}/tables/positions`, {
+    await fetch(`api/${currentDb.id}/tables/positions`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ positions: toSave }),
@@ -1474,7 +1500,7 @@ function drawGraphRelations(canvas, svg) {
       );
       if (!confirmed) return;
       try {
-        const res = await fetch(`/api/${currentDb.id}/${rel.table}/columns/${rel.column}/relation`, { method: 'DELETE' });
+        const res = await fetch(`api/${currentDb.id}/${rel.table}/columns/${rel.column}/relation`, { method: 'DELETE' });
         if (!res.ok) {
           const data = await res.json().catch(() => ({}));
           throw new Error(data.error || 'Échec de la suppression');
@@ -1552,7 +1578,7 @@ function handleNodeDragEnd() {
   currentDb.nodePositions = currentDb.nodePositions || {};
   currentDb.nodePositions[state.tableName] = { x, y };
 
-  fetch(`/api/${currentDb.id}/tables/${state.tableName}/position`, {
+  fetch(`api/${currentDb.id}/tables/${state.tableName}/position`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ x, y }),
@@ -1615,7 +1641,7 @@ async function handleConnectDragEnd(e) {
     const refSchema = graphCache.schemas[refTable] || { columns: [] };
     const refDisplay = refColumn !== 'id' ? refColumn : (refSchema.columns.find(c => c !== 'id') || refColumn);
 
-    const res = await fetch(`/api/${currentDb.id}/${state.fromTable}/columns/${state.fromColumn}/relation`, {
+    const res = await fetch(`api/${currentDb.id}/${state.fromTable}/columns/${state.fromColumn}/relation`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ refTable, refColumn, refDisplay }),
@@ -1797,7 +1823,7 @@ formNewDb.addEventListener('submit', async (e) => {
   const icon = document.getElementById('inputDbIcon').value.trim();
 
   try {
-    const res = await fetch('/api/databases', {
+    const res = await fetch('api/databases', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ name, icon })
@@ -1858,7 +1884,7 @@ formImportDb.addEventListener('submit', async (e) => {
   try {
     const fileBuffer = await file.arrayBuffer();
     const params = new URLSearchParams({ name, icon });
-    const res = await fetch(`/api/databases/import?${params.toString()}`, {
+    const res = await fetch(`api/databases/import?${params.toString()}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/octet-stream' },
       body: fileBuffer
@@ -1942,7 +1968,7 @@ formNewTable.addEventListener('submit', async (e) => {
   }
 
   try {
-    const res = await fetch(`/api/${currentDb.id}/tables`, {
+    const res = await fetch(`api/${currentDb.id}/tables`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ tableName, columns })
@@ -2059,7 +2085,7 @@ formNewRow.addEventListener('submit', async (e) => {
   });
 
   try {
-    const res = await fetch(`/api/${currentDb.id}/${currentTable.name}`, {
+    const res = await fetch(`api/${currentDb.id}/${currentTable.name}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(data)
@@ -2294,31 +2320,54 @@ function openRowDetailModal(rowId) {
   modalRowDetail.classList.add('open');
 }
 
+// analyse caractère par caractère sur tout le texte (pas une pré-découpe par
+// ligne : celle-ci casserait sur tout retour à la ligne présent à
+// l'intérieur d'un champ entre guillemets, cas standard pour un export
+// Excel/Sheets). Gère aussi les guillemets échappés ("" à l'intérieur d'un
+// champ entre guillemets représente un seul " littéral, format RFC4180)
 function parseCsv(text) {
-  const lines = text.split(/\r?\n/).filter(l => l.trim() !== '');
-  if (lines.length === 0) return { headers: [], rows: [] };
+  const records = [];
+  let record = [];
+  let field = '';
+  let inQuotes = false;
 
-  const parseLine = (line) => {
-    const result = [];
-    let current = '';
-    let inQuotes = false;
-    for (let i = 0; i < line.length; i++) {
-      const char = line[i];
+  function pushField() {
+    record.push(field.trim());
+    field = '';
+  }
+  function pushRecord() {
+    pushField();
+    records.push(record);
+    record = [];
+  }
+
+  for (let i = 0; i < text.length; i++) {
+    const char = text[i];
+    if (inQuotes) {
       if (char === '"') {
-        inQuotes = !inQuotes;
-      } else if (char === ',' && !inQuotes) {
-        result.push(current.trim());
-        current = '';
-      } else {
-        current += char;
+        if (text[i + 1] === '"') { field += '"'; i++; continue; } // guillemet échappé
+        inQuotes = false;
+        continue;
       }
+      field += char;
+      continue;
     }
-    result.push(current.trim());
-    return result;
-  };
+    if (char === '"') { inQuotes = true; continue; }
+    if (char === ',') { pushField(); continue; }
+    if (char === '\r') continue;
+    if (char === '\n') { pushRecord(); continue; }
+    field += char;
+  }
+  // dernier enregistrement s'il ne se termine pas par un retour à la ligne
+  if (field !== '' || record.length > 0) pushRecord();
 
-  const headers = parseLine(lines[0]);
-  const rows = lines.slice(1).map(parseLine).map(values => {
+  // ignore les lignes vides (un seul champ vide), comme le filtrage par
+  // ligne le faisait avant cette réécriture
+  const nonEmpty = records.filter(r => !(r.length === 1 && r[0] === ''));
+  if (nonEmpty.length === 0) return { headers: [], rows: [] };
+
+  const [headers, ...dataRecords] = nonEmpty;
+  const rows = dataRecords.map(values => {
     const obj = {};
     headers.forEach((h, i) => { obj[h] = values[i] ?? ''; });
     return obj;
@@ -2383,7 +2432,7 @@ document.getElementById('csvFileInput').addEventListener('change', async (e) => 
       return obj;
     });
 
-    const res = await fetch(`/api/${currentDb.id}/${currentTable.name}/bulk`, {
+    const res = await fetch(`api/${currentDb.id}/${currentTable.name}/bulk`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ rows: cleanedRows })
@@ -2491,11 +2540,65 @@ function openQueryModal() {
   queryResults.innerHTML = '';
   modalQuery.classList.add('open');
   queryInput.focus();
+  refreshSavedQueries();
 }
 
 function closeQueryModal() {
   modalQuery.classList.remove('open');
 }
+
+// ---------- Requêtes SQL sauvegardées ----------
+
+let savedQueries = [];
+
+async function refreshSavedQueries() {
+  if (!currentDb) return;
+  const res = await fetch(`api/${currentDb.id}/queries`);
+  savedQueries = await res.json();
+  renderSavedQueriesList();
+}
+
+function renderSavedQueriesList() {
+  const listEl = document.getElementById('savedQueriesList');
+  listEl.innerHTML = savedQueries.map((q) => `
+    <div class="saved-query-chip" data-id="${escapeHtml(q.id)}">
+      <span class="saved-query-name" data-sql="${escapeHtml(q.sql)}" title="${escapeHtml(q.sql)}">${escapeHtml(q.name)}</span>
+      <button type="button" class="saved-query-delete" title="Supprimer" data-id="${escapeHtml(q.id)}">✕</button>
+    </div>
+  `).join('');
+}
+
+document.getElementById('savedQueriesList').addEventListener('click', (e) => {
+  const delBtn = e.target.closest('.saved-query-delete');
+  if (delBtn) {
+    deleteSavedQueryById(delBtn.dataset.id);
+    return;
+  }
+  const nameEl = e.target.closest('.saved-query-name');
+  if (nameEl) queryInput.value = nameEl.dataset.sql;
+});
+
+async function deleteSavedQueryById(id) {
+  if (!currentDb) return;
+  if (!confirm('Supprimer cette requête sauvegardée ?')) return;
+  await fetch(`api/${currentDb.id}/queries/${encodeURIComponent(id)}`, { method: 'DELETE' });
+  await refreshSavedQueries();
+}
+
+document.getElementById('btnSaveQuery').addEventListener('click', async () => {
+  const sql = queryInput.value.trim();
+  if (!sql || !currentDb) return;
+  const name = prompt('Nom de cette requête :');
+  if (!name || !name.trim()) return;
+  const res = await fetch(`api/${currentDb.id}/queries`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: name.trim(), sql }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) { alert(data.error || "Échec de l'enregistrement."); return; }
+  await refreshSavedQueries();
+});
 
 document.getElementById('closeQuery').addEventListener('click', closeQueryModal);
 modalQuery.addEventListener('click', (e) => {
@@ -2509,7 +2612,7 @@ document.getElementById('btnRunQuery').addEventListener('click', async () => {
   if (!sql || !currentDb) return;
 
   try {
-    const res = await fetch(`/api/${currentDb.id}/query`, {
+    const res = await fetch(`api/${currentDb.id}/query`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ sql })
@@ -2626,7 +2729,7 @@ async function populateColumnsModalRelationSelects(refTableName, selectedRefColu
     refDisplaySelect.innerHTML = '';
     return;
   }
-  const data = await columnsModalRequest(`/api/${currentDb.id}/${refTableName}`);
+  const data = await columnsModalRequest(`api/${currentDb.id}/${refTableName}`);
   const optionsHtml = (data.columns || []).map(c => `<option value="${escapeHtml(c)}">${escapeHtml(c)}</option>`).join('');
   refColSelect.innerHTML = optionsHtml;
   refDisplaySelect.innerHTML = optionsHtml;
@@ -2701,7 +2804,7 @@ function wireColumnsModalColumnTab(col, relation) {
     if (!newName || newName === col) return;
     errorEl.textContent = '';
     try {
-      await columnsModalRequest(`/api/${currentDb.id}/${currentTable.name}/columns/${col}`, {
+      await columnsModalRequest(`api/${currentDb.id}/${currentTable.name}/columns/${col}`, {
         method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ newName })
       });
       columnsModalSelectedColumn = newName;
@@ -2714,7 +2817,7 @@ function wireColumnsModalColumnTab(col, relation) {
     const confirmed = await showConfirm(`Supprimer définitivement la colonne « ${col} » ?`, 'Supprimer la colonne');
     if (!confirmed) return;
     try {
-      await columnsModalRequest(`/api/${currentDb.id}/${currentTable.name}/columns/${col}`, { method: 'DELETE' });
+      await columnsModalRequest(`api/${currentDb.id}/${currentTable.name}/columns/${col}`, { method: 'DELETE' });
       columnsModalSelectedColumn = null;
       await refreshColumnsModal();
       showToast('Colonne supprimée.', 'success');
@@ -2734,7 +2837,7 @@ function wireColumnsModalColumnTab(col, relation) {
     const refDisplay = document.getElementById('selectColumnsModalRefDisplay').value;
     const cascade = document.getElementById('checkboxColumnsModalCascade').checked;
     try {
-      await columnsModalRequest(`/api/${currentDb.id}/${currentTable.name}/columns/${col}/relation`, {
+      await columnsModalRequest(`api/${currentDb.id}/${currentTable.name}/columns/${col}/relation`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ refTable, refColumn, refDisplay, cascade })
       });
@@ -2748,7 +2851,7 @@ function wireColumnsModalColumnTab(col, relation) {
     removeRelationBtn.addEventListener('click', async () => {
       errorEl.textContent = '';
       try {
-        await columnsModalRequest(`/api/${currentDb.id}/${currentTable.name}/columns/${col}/relation`, { method: 'DELETE' });
+        await columnsModalRequest(`api/${currentDb.id}/${currentTable.name}/columns/${col}/relation`, { method: 'DELETE' });
         await refreshColumnsModal();
         showToast('Liaison supprimée.', 'success');
       } catch (err) { errorEl.textContent = err.message; }
@@ -2765,7 +2868,7 @@ function wireColumnsModalColumnTab(col, relation) {
       defaultValue: document.getElementById('inputColumnsModalDefault').value,
     };
     try {
-      await columnsModalRequest(`/api/${currentDb.id}/${currentTable.name}/columns/${col}/validation`, {
+      await columnsModalRequest(`api/${currentDb.id}/${currentTable.name}/columns/${col}/validation`, {
         method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
       });
       await refreshColumnsModal();
@@ -2782,7 +2885,7 @@ document.getElementById('formColumnsModalAddColumn').addEventListener('submit', 
   if (!name) return;
   const choice = resolveColumnChoice(document.getElementById('selectColumnsModalNewColType').value);
   try {
-    await columnsModalRequest(`/api/${currentDb.id}/${currentTable.name}/columns`, {
+    await columnsModalRequest(`api/${currentDb.id}/${currentTable.name}/columns`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ name, type: choice.type, kind: choice.kind })
     });
@@ -2809,7 +2912,7 @@ function renderColumnsModalIndexTab() {
   list.querySelectorAll('.btn-columns-modal-remove-index').forEach(btn => {
     btn.addEventListener('click', async () => {
       try {
-        await columnsModalRequest(`/api/${currentDb.id}/${currentTable.name}/indexes/${btn.dataset.indexName}`, { method: 'DELETE' });
+        await columnsModalRequest(`api/${currentDb.id}/${currentTable.name}/indexes/${btn.dataset.indexName}`, { method: 'DELETE' });
         await refreshColumnsModal();
         showToast('Index supprimé.', 'success');
       } catch (err) { showToast(err.message, 'error'); }
@@ -2829,7 +2932,7 @@ document.getElementById('formColumnsModalAddIndex').addEventListener('submit', a
   const unique = document.getElementById('checkboxColumnsModalIndexUnique').checked;
   if (columns.length === 0) { errorEl.textContent = 'Choisissez au moins une colonne.'; return; }
   try {
-    await columnsModalRequest(`/api/${currentDb.id}/${currentTable.name}/indexes`, {
+    await columnsModalRequest(`api/${currentDb.id}/${currentTable.name}/indexes`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ columns, unique })
     });
     e.target.reset();
@@ -2843,7 +2946,7 @@ document.getElementById('formColumnsModalAddIndex').addEventListener('submit', a
 document.getElementById('selectComputedRefTable').addEventListener('change', async (e) => {
   const refColSelect = document.getElementById('selectComputedRefColumn');
   if (!e.target.value) { refColSelect.innerHTML = ''; return; }
-  const data = await columnsModalRequest(`/api/${currentDb.id}/${e.target.value}`);
+  const data = await columnsModalRequest(`api/${currentDb.id}/${e.target.value}`);
   refColSelect.innerHTML = (data.columns || []).map(c => `<option value="${escapeHtml(c)}">${escapeHtml(c)}</option>`).join('');
 });
 
@@ -2860,7 +2963,7 @@ function renderColumnsModalComputedTab() {
   computedList.querySelectorAll('.btn-columns-modal-remove-computed').forEach(btn => {
     btn.addEventListener('click', async () => {
       try {
-        await columnsModalRequest(`/api/${currentDb.id}/${currentTable.name}/computed-columns/${btn.dataset.col}`, { method: 'DELETE' });
+        await columnsModalRequest(`api/${currentDb.id}/${currentTable.name}/computed-columns/${btn.dataset.col}`, { method: 'DELETE' });
         await refreshColumnsModal();
         showToast('Champ calculé supprimé.', 'success');
       } catch (err) { showToast(err.message, 'error'); }
@@ -2879,7 +2982,7 @@ function renderColumnsModalComputedTab() {
   formulaList.querySelectorAll('.btn-columns-modal-remove-formula').forEach(btn => {
     btn.addEventListener('click', async () => {
       try {
-        await columnsModalRequest(`/api/${currentDb.id}/${currentTable.name}/formula-columns/${btn.dataset.col}`, { method: 'DELETE' });
+        await columnsModalRequest(`api/${currentDb.id}/${currentTable.name}/formula-columns/${btn.dataset.col}`, { method: 'DELETE' });
         await refreshColumnsModal();
         showToast('Champ formule supprimé.', 'success');
       } catch (err) { showToast(err.message, 'error'); }
@@ -2904,7 +3007,7 @@ document.getElementById('formColumnsModalAddComputed').addEventListener('submit'
   const refColumn = document.getElementById('selectComputedRefColumn').value;
   if (!name || !sourceColumn || !refTable || !refColumn) { errorEl.textContent = 'Tous les champs sont requis.'; return; }
   try {
-    await columnsModalRequest(`/api/${currentDb.id}/${currentTable.name}/computed-columns`, {
+    await columnsModalRequest(`api/${currentDb.id}/${currentTable.name}/computed-columns`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ name, sourceColumn, refTable, refColumn })
     });
@@ -2923,7 +3026,7 @@ document.getElementById('formColumnsModalAddFormula').addEventListener('submit',
   const expression = document.getElementById('inputFormulaExpression').value.trim();
   if (!name || !expression) return;
   try {
-    await columnsModalRequest(`/api/${currentDb.id}/${currentTable.name}/formula-columns`, {
+    await columnsModalRequest(`api/${currentDb.id}/${currentTable.name}/formula-columns`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ name, expression })
     });
@@ -2951,7 +3054,7 @@ function renderColumnsModalFormatTab() {
   list.querySelectorAll('.btn-columns-modal-remove-format').forEach(btn => {
     btn.addEventListener('click', async () => {
       try {
-        await columnsModalRequest(`/api/${currentDb.id}/${currentTable.name}/conditional-formats/${btn.dataset.ruleId}`, { method: 'DELETE' });
+        await columnsModalRequest(`api/${currentDb.id}/${currentTable.name}/conditional-formats/${btn.dataset.ruleId}`, { method: 'DELETE' });
         await refreshColumnsModal();
         showToast('Règle supprimée.', 'success');
       } catch (err) { showToast(err.message, 'error'); }
@@ -2973,7 +3076,7 @@ document.getElementById('formColumnsModalAddFormat').addEventListener('submit', 
   const target = document.getElementById('selectFormatTarget').value;
   if (!column) { errorEl.textContent = 'Choisissez une colonne.'; return; }
   try {
-    await columnsModalRequest(`/api/${currentDb.id}/${currentTable.name}/conditional-formats`, {
+    await columnsModalRequest(`api/${currentDb.id}/${currentTable.name}/conditional-formats`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ column, operator, value, color, target })
     });
@@ -2992,7 +3095,7 @@ let globalSearchCache = null; // { tableName: { columns, columnTypes, columnKind
 async function loadGlobalSearchData() {
   if (!currentDb) return;
   const entries = await Promise.all(currentDb.tables.map(async t => {
-    const res = await fetch(`/api/${currentDb.id}/${t.name}`);
+    const res = await fetch(`api/${currentDb.id}/${t.name}`);
     const data = res.ok ? await res.json() : { columns: [], rows: [] };
     return [t.name, data];
   }));
@@ -3250,7 +3353,7 @@ document.getElementById('btnDeleteSelected').addEventListener('click', async () 
 
   try {
     const results = await Promise.all(ids.map(id =>
-      fetch(`/api/${currentDb.id}/${currentTable.name}/${id}`, { method: 'DELETE' })
+      fetch(`api/${currentDb.id}/${currentTable.name}/${id}`, { method: 'DELETE' })
     ));
     const failed = results.filter(r => !r.ok).length;
     const succeeded = results.length - failed;
@@ -3272,7 +3375,7 @@ document.getElementById('btnUndo').addEventListener('click', async () => {
   if (!last) return;
 
   try {
-    const res = await fetch(`/api/${last.dbId}/${last.tableName}/${last.rowId}`, {
+    const res = await fetch(`api/${last.dbId}/${last.tableName}/${last.rowId}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ [last.column]: last.oldValue === '' ? null : last.oldValue })
@@ -3297,7 +3400,7 @@ document.getElementById('btnRedo').addEventListener('click', async () => {
   if (!last) return;
 
   try {
-    const res = await fetch(`/api/${last.dbId}/${last.tableName}/${last.rowId}`, {
+    const res = await fetch(`api/${last.dbId}/${last.tableName}/${last.rowId}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ [last.column]: last.newValue === '' ? null : last.newValue })
@@ -3321,7 +3424,7 @@ enableDragReorder(document.getElementById('dbList'), '.db-item', 'vertical', (it
   const orderedIds = items.map(el => el.dataset.dbId);
   databases.sort((a, b) => orderedIds.indexOf(a.id) - orderedIds.indexOf(b.id));
 
-  fetch('/api/databases/order', {
+  fetch('api/databases/order', {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ orderedIds })
@@ -3332,7 +3435,7 @@ enableDragReorder(document.getElementById('tabs'), '.tab:not(.tab-add)', 'horizo
   const orderedNames = items.map(el => el.dataset.tableName);
   currentDb.tables.sort((a, b) => orderedNames.indexOf(a.name) - orderedNames.indexOf(b.name));
 
-  fetch(`/api/${currentDb.id}/tables/order`, {
+  fetch(`api/${currentDb.id}/tables/order`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ orderedNames })
@@ -3352,7 +3455,7 @@ enableDragReorder(document.getElementById('content'), 'th.sortable', 'horizontal
   currentTableData.columns = orderedNames;
   renderContent();
 
-  fetch(`/api/${currentDb.id}/${currentTable.name}/columns/order`, {
+  fetch(`api/${currentDb.id}/${currentTable.name}/columns/order`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ orderedNames })
@@ -3499,15 +3602,6 @@ document.getElementById('breadcrumb').addEventListener('click', async () => {
   }
 });
 
-document.getElementById('btnLogout').addEventListener('click', async () => {
-  try {
-    await nativeFetch('/api/auth/logout', { method: 'POST' });
-  } catch (err) {
-    // ignore, on redirige quand même vers la page de connexion
-  }
-  window.location.href = '/login.html';
-});
-
 // =========================================================================
 // RACCOURCIS CLAVIER — Ctrl/Cmd+F (recherche), Échap (ferme la modale
 // ouverte). Pas de navigation aux flèches entre cellules : elles doivent
@@ -3539,14 +3633,6 @@ document.addEventListener('keydown', (e) => {
   }
 });
 
-async function checkAuthThenInit() {
-  const res = await nativeFetch('/api/auth/status');
-  const status = await res.json();
-  if (!status.authenticated) {
-    window.location.href = '/login.html';
-    return;
-  }
-  loadDatabases();
-}
-
-checkAuthThenInit();
+// exposé pour le harnais de vérification (jsdom), qui peut ainsi attendre la
+// fin du premier chargement au lieu de deviner un délai
+window.__ready = loadDatabases();

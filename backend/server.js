@@ -2,27 +2,23 @@ const express = require('express');
 const path = require('path');
 const { listDatabases } = require('./db/db');
 const dataRoutes = require('./routes/data');
-const authRoutes = require('./routes/auth');
-const { requireAuth } = require('./auth');
 
 const app = express();
-const PORT = 3000;
+// surchageable par le harnais de vérification (jsdom), pour ne jamais
+// toucher au vrai port pendant le développement/les tests
+const PORT = process.env.DATASITE_PORT || 3000;
 
 // limite relevée pour accepter les images importées en base64 (data URI) dans les lignes
 app.use(express.json({ limit: '15mb' }));
 
-// Sert le frontend (HTML/CSS/JS statiques) — la page elle-même ne contient
-// aucune donnée sensible, seule l'API ci-dessous est protégée
+// Sert le frontend (HTML/CSS/JS statiques)
 app.use(express.static(path.join(__dirname, '../frontend')));
 
-// Authentification : jamais protégées par requireAuth
-app.use('/api/auth', authRoutes);
-
-// Toutes les routes API liées aux données, protégées par authentification
-app.use('/api', requireAuth, dataRoutes);
+// outil local mono-utilisateur : pas d'authentification
+app.use('/api', dataRoutes);
 
 // Route de contrôle simple
-app.get('/api/ping', requireAuth, (req, res) => {
+app.get('/api/ping', (req, res) => {
   res.json({ ok: true, databases: listDatabases().map(d => d.id) });
 });
 

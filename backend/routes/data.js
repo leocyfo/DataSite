@@ -35,6 +35,9 @@ const {
   renameColumn,
   dropColumn,
   runQuery,
+  listSavedQueries,
+  saveNamedQuery,
+  deleteSavedQuery,
   bulkInsertRows,
   getRelations,
   getRowReferences,
@@ -503,6 +506,35 @@ router.post('/:dbId/query', (req, res) => {
     }
     const result = runQuery(dbId, sql);
     res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/:dbId/queries  -> requêtes SQL sauvegardées pour cette base
+router.get('/:dbId/queries', (req, res) => {
+  try {
+    res.json(listSavedQueries(req.params.dbId));
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/:dbId/queries  { name, sql } -> sauvegarde une requête nommée
+router.post('/:dbId/queries', (req, res) => {
+  try {
+    const { name, sql } = req.body;
+    const query = saveNamedQuery(req.params.dbId, name, sql);
+    res.status(201).json({ ok: true, query });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+router.delete('/:dbId/queries/:queryId', (req, res) => {
+  try {
+    deleteSavedQuery(req.params.dbId, req.params.queryId);
+    res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

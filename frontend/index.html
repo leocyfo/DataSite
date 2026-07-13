@@ -32,7 +32,6 @@
       Chargement...
     </div>
     <button class="btn-theme-toggle" id="btnThemeToggle" title="Basculer le thème clair/sombre">🌙 Thème sombre</button>
-    <button class="btn-logout" id="btnLogout">Déconnexion</button>
   </aside>
 
   <div class="sidebar-backdrop" id="sidebarBackdrop"></div>
@@ -43,6 +42,7 @@
       <button class="btn-mobile-menu" id="btnMobileMenu" title="Ouvrir le menu">☰</button>
 
       <div class="topbar-toolbar" id="topbarToolbar">
+        <a href="http://localhost:8080/" class="btn-toolbar" title="Retour au hub">← Hub</a>
         <div class="menu-item">
           <button class="btn-toolbar menu-trigger" id="btnFileMenu">Fichier <span class="menu-caret">▾</span></button>
           <div class="menu-dropdown" id="fileMenuDropdown">
@@ -330,9 +330,11 @@
 <div class="modal-overlay" id="modalQuery">
   <div class="modal modal-wide">
     <h2>Requête SQL (lecture seule)</h2>
+    <div id="savedQueriesList" class="saved-queries-list"></div>
     <textarea id="queryInput" class="query-textarea" rows="4" placeholder="SELECT * FROM ma_table WHERE ..."></textarea>
     <div class="modal-actions">
       <button type="button" class="btn-secondary" id="closeQuery">Fermer</button>
+      <button type="button" class="btn-secondary" id="btnSaveQuery">Sauvegarder</button>
       <button type="button" class="btn-primary" id="btnRunQuery">Exécuter</button>
     </div>
     <p class="form-error" id="errorQuery"></p>

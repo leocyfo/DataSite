@@ -2,7 +2,10 @@ const Database = require('better-sqlite3');
 const fs = require('fs');
 const path = require('path');
 
-const DB_DIR = __dirname;
+// surchageable par le harnais de vérification (jsdom), pour ne jamais
+// toucher aux vraies bases pendant le développement/les tests
+const DB_DIR = process.env.DATASITE_DB_DIR || __dirname;
+fs.mkdirSync(DB_DIR, { recursive: true });
 const REGISTRY_PATH = path.join(DB_DIR, 'registry.json');
 
 function loadRegistry() {
@@ -799,24 +802,50 @@ function getTableData(dbId, tableName) {
 
   const relations = getTableRelations(dbId, tableName);
   const relationOptions = {};
+  // plafonne la table référencée (évite de charger des dizaines de milliers
+  // de lignes juste pour peupler une liste déroulante), puis complète avec
+  // les valeurs réellement utilisées par les lignes déjà chargées pour
+  // qu'aucune relation existante ne se retrouve orpheline hors de la fenêtre
+  // des 200 premières lignes
+  const RELATION_OPTIONS_LIMIT = 200;
   relations.forEach(rel => {
-    relationOptions[rel.column] = db.prepare(
-      `SELECT "${rel.refColumn}" as id, "${rel.refDisplay}" as label FROM "${rel.refTable}"`
+    const limited = db.prepare(
+      `SELECT "${rel.refColumn}" as id, "${rel.refDisplay}" as label FROM "${rel.refTable}" LIMIT ${RELATION_OPTIONS_LIMIT}`
     ).all();
+    const limitedIds = new Set(limited.map(o => String(o.id)));
+    const used = [...new Set(rows.map(r => r[rel.column]).filter(v => v != null))];
+    const missing = used.filter(v => !limitedIds.has(String(v)));
+    const extra = missing.length
+      ? db.prepare(
+          `SELECT "${rel.refColumn}" as id, "${rel.refDisplay}" as label FROM "${rel.refTable}" WHERE "${rel.refColumn}" IN (${missing.map(() => '?').join(',')})`
+        ).all(...missing)
+      : [];
+    relationOptions[rel.column] = [...limited, ...extra];
   });
 
   const columnKinds = getColumnKinds(dbId, tableName);
   const pinnedColumn = getPinnedColumn(dbId, tableName);
 
-  // colonnes calculées : ignore silencieusement celles devenues orphelines
-  // (table/colonne référencée supprimée depuis)
+  // colonnes calculées/formule invalides : masquées comme avant (la table
+  // reste utilisable), mais désormais signalées via `warnings` plutôt que
+  // disparaître sans explication — voir loadTableData() côté frontend
+  const warnings = [];
+
+  // colonnes calculées : devenues orphelines si la table/colonne référencée
+  // a été supprimée depuis
   const existingTables = new Set(
     db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'`).all().map(r => r.name)
   );
   Object.entries(getComputedColumns(dbId, tableName)).forEach(([colName, def]) => {
-    if (!columns.includes(def.sourceColumn) || !existingTables.has(def.refTable)) return;
+    if (!columns.includes(def.sourceColumn) || !existingTables.has(def.refTable)) {
+      warnings.push(`La colonne calculée « ${colName} » a été masquée : sa colonne source ou sa table référencée n'existe plus.`);
+      return;
+    }
     const refCols = db.prepare(`PRAGMA table_info("${def.refTable}")`).all().map(c => c.name);
-    if (!refCols.includes(def.refColumn)) return;
+    if (!refCols.includes(def.refColumn)) {
+      warnings.push(`La colonne calculée « ${colName} » a été masquée : sa colonne référencée n'existe plus.`);
+      return;
+    }
 
     const counts = {};
     db.prepare(`SELECT "${def.refColumn}" as k, COUNT(*) as c FROM "${def.refTable}" GROUP BY "${def.refColumn}"`)
@@ -829,8 +858,8 @@ function getTableData(dbId, tableName) {
     columnKinds[colName] = 'computed';
   });
 
-  // champs calculés sur la même ligne : ignore silencieusement ceux devenus
-  // invalides (colonne source supprimée/renommée depuis)
+  // champs calculés sur la même ligne : devenus invalides si la colonne
+  // source a été supprimée/renommée depuis
   Object.entries(getFormulaColumns(dbId, tableName)).forEach(([colName, def]) => {
     try {
       const ast = compileFormula(def.expression, columns);
@@ -839,7 +868,7 @@ function getTableData(dbId, tableName) {
       columnTypes[colName] = 'REAL';
       columnKinds[colName] = 'formula';
     } catch {
-      // expression invalide : ce champ n'apparaît simplement pas cette fois-ci
+      warnings.push(`Le champ formule « ${colName} » a été masqué : son expression n'est plus valide (colonne source manquante ?).`);
     }
   });
 
@@ -858,7 +887,7 @@ function getTableData(dbId, tableName) {
     columns.push(...reordered);
   }
 
-  return { columns, columnTypes, columnKinds, rows, relations, relationOptions, pinnedColumn, totals, columnValidation, indexes, formulas, conditionalFormats };
+  return { columns, columnTypes, columnKinds, rows, relations, relationOptions, pinnedColumn, totals, columnValidation, indexes, formulas, conditionalFormats, warnings };
 }
 
 // index/unicité : de vrais index SQLite (créés/supprimés directement en base),
@@ -1165,6 +1194,37 @@ function runQuery(dbId, sql) {
   return { columns, rows };
 }
 
+function listSavedQueries(dbId) {
+  const registry = loadRegistry();
+  const entry = registry.find(d => d.id === dbId);
+  return (entry && entry.savedQueries) || [];
+}
+
+function saveNamedQuery(dbId, name, sql) {
+  const trimmedName = String(name || '').trim();
+  const trimmedSql = String(sql || '').trim();
+  if (!trimmedName) throw new Error('Le nom de la requête est requis.');
+  if (!trimmedSql) throw new Error('La requête SQL est requise.');
+
+  const registry = loadRegistry();
+  const entry = registry.find(d => d.id === dbId);
+  if (!entry) throw new Error(`Base de données inconnue: ${dbId}`);
+  entry.savedQueries = entry.savedQueries || [];
+
+  const query = { id: `q${Date.now()}${Math.floor(Math.random() * 1000)}`, name: trimmedName, sql: trimmedSql };
+  entry.savedQueries.push(query);
+  saveRegistry(registry);
+  return query;
+}
+
+function deleteSavedQuery(dbId, queryId) {
+  const registry = loadRegistry();
+  const entry = registry.find(d => d.id === dbId);
+  if (!entry) throw new Error(`Base de données inconnue: ${dbId}`);
+  entry.savedQueries = (entry.savedQueries || []).filter(q => q.id !== queryId);
+  saveRegistry(registry);
+}
+
 function updateRow(dbId, tableName, rowId, data) {
   const db = getConnection(dbId);
   const safeTable = safeIdentifier(tableName);
@@ -1258,6 +1318,9 @@ module.exports = {
   renameColumn,
   dropColumn,
   runQuery,
+  listSavedQueries,
+  saveNamedQuery,
+  deleteSavedQuery,
   bulkInsertRows,
   getRelations,
   getTableRelations,

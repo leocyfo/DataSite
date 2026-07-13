@@ -1,4 +1,6 @@
 ﻿node_modules/
 backend/db/*.db
 backend/db/registry.json
-backend/db/auth.json
+
+# config locale de l'assistant, spécifique à cette machine
+.claude/
