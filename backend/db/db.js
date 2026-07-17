@@ -14,7 +14,13 @@ function loadRegistry() {
 }
 
 function saveRegistry(registry) {
-  fs.writeFileSync(REGISTRY_PATH, JSON.stringify(registry, null, 2));
+  // écrit dans un fichier temporaire puis renomme — renommage atomique, donc
+  // le fichier final contient toujours soit l'ancien contenu complet soit le
+  // nouveau, jamais un état à moitié écrit (même pattern que les 8 autres
+  // outils du hub)
+  const tmpPath = `${REGISTRY_PATH}.tmp`;
+  fs.writeFileSync(tmpPath, JSON.stringify(registry, null, 2));
+  fs.renameSync(tmpPath, REGISTRY_PATH);
 }
 
 function safeIdentifier(name) {
