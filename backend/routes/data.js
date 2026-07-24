@@ -1,5 +1,16 @@
 const express = require('express');
 const router = express.Router();
+
+// les autres validations de ce fichier sont ad hoc par route (le nom des
+// colonnes d'une ligne est défini par l'utilisateur à la création de la
+// table, donc pas de schéma fixe à valider comme dans les 8 autres outils
+// du hub) — ce garde-fou couvre juste le cas manquant : un corps qui n'est
+// pas un objet simple (tableau, null, chaîne...) plantait plus loin dans
+// validateRowData()/bulkInsertRows() avec une erreur 500 peu claire au lieu
+// d'un 400 propre
+function isPlainObject(value) {
+  return !!value && typeof value === 'object' && !Array.isArray(value);
+}
 const {
   listDatabases,
   createDatabase,
@@ -554,6 +565,9 @@ router.get('/:dbId/:tableName', (req, res) => {
 // POST /api/:dbId/:tableName  -> insérer une ligne { colonne: valeur, ... }
 router.post('/:dbId/:tableName', (req, res) => {
   try {
+    if (!isPlainObject(req.body)) {
+      return res.status(400).json({ error: 'Le corps doit être un objet { colonne: valeur, ... }.' });
+    }
     const { dbId, tableName } = req.params;
     const { id } = insertRow(dbId, tableName, req.body);
     res.status(201).json({ success: true, id });
@@ -564,6 +578,9 @@ router.post('/:dbId/:tableName', (req, res) => {
 
 router.patch('/:dbId/:tableName/:rowId', (req, res) => {
   try {
+    if (!isPlainObject(req.body)) {
+      return res.status(400).json({ error: 'Le corps doit être un objet { colonne: valeur, ... }.' });
+    }
     const { dbId, tableName, rowId } = req.params;
     updateRow(dbId, tableName, rowId, req.body);
     res.json({ success: true });
@@ -601,6 +618,9 @@ router.post('/:dbId/:tableName/bulk', (req, res) => {
     const { rows } = req.body;
     if (!Array.isArray(rows) || rows.length === 0) {
       return res.status(400).json({ error: 'Aucune ligne à importer.' });
+    }
+    if (!rows.every(isPlainObject)) {
+      return res.status(400).json({ error: 'Chaque ligne doit être un objet { colonne: valeur, ... }.' });
     }
     const result = bulkInsertRows(dbId, tableName, rows);
     res.status(201).json(result);
