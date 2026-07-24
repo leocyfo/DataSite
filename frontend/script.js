@@ -264,6 +264,15 @@ async function loadDatabases() {
   const res = await fetch('api/databases');
   databases = await res.json();
 
+  // arrivée depuis l'onglet groupé d'un projet-hub (voir project-wiki.js) :
+  // ne montrer que les bases liées à CE projet plutôt que toutes les bases
+  // de l'outil, tous projets confondus
+  const filtre = new URLSearchParams(location.search).get('projetRessources');
+  if (filtre) {
+    const idsAutorises = new Set(filtre.split(','));
+    databases = databases.filter((db) => idsAutorises.has(db.id));
+  }
+
   document.getElementById('sidebarFooter').innerHTML =
     `Node.js · SQLite<br>${databases.length} base${databases.length === 1 ? '' : 's'} connectée${databases.length === 1 ? '' : 's'}`;
 
@@ -432,6 +441,18 @@ function renderSidebar() {
       renderAll();
     });
     list.appendChild(li);
+
+    // liste des tables imbriquée sous la base actuellement sélectionnée —
+    // remplace l'ancienne rangée d'onglets horizontale en haut, qui devenait
+    // illisible/inatteignable dès qu'une base avait beaucoup de tables (17
+    // ici) : une liste verticale dans la sidebar défile naturellement,
+    // comme la liste des bases elle-même
+    if (currentDb && db.id === currentDb.id) {
+      const hostLi = document.createElement('li');
+      hostLi.className = 'table-list-host';
+      hostLi.innerHTML = `<ul class="table-list" id="tableList"></ul>`;
+      list.appendChild(hostLi);
+    }
   });
 }
 
@@ -462,14 +483,19 @@ function renderTopbar() {
   document.getElementById('statTables').textContent = currentDb.tables.length;
 }
 
+// liste des tables : rendue dans la sidebar, sous la base sélectionnée (voir
+// #tableList, créé par renderSidebar() juste avant cet appel dans renderAll())
+// — plus de rangée d'onglets horizontale en haut, illisible/inatteignable
+// dès qu'une base a beaucoup de tables
 function renderTabs() {
-  const tabsEl = document.getElementById('tabs');
+  const tabsEl = document.getElementById('tableList');
+  if (!tabsEl) return; // pas de base sélectionnée : renderSidebar() n'a rien créé
   tabsEl.innerHTML = '';
   if (!currentDb) return;
 
   currentDb.tables.forEach(table => {
-    const tab = document.createElement('div');
-    tab.className = 'tab' + (viewMode === 'table' && currentTable && table.name === currentTable.name ? ' active' : '');
+    const tab = document.createElement('li');
+    tab.className = 'table-item' + (viewMode === 'table' && currentTable && table.name === currentTable.name ? ' active' : '');
     tab.draggable = true;
     tab.dataset.tableName = table.name;
     tab.innerHTML = `<span>${escapeHtml(table.name)}</span><button class="btn-rename-tab" title="Renommer cette table">✎</button><button class="btn-delete-tab" title="Supprimer cette table">×</button>`;
@@ -532,20 +558,20 @@ function renderTabs() {
     tabsEl.appendChild(tab);
   });
 
-  const addTab = document.createElement('div');
-  addTab.className = 'tab tab-add';
+  const addTab = document.createElement('li');
+  addTab.className = 'table-item table-item-action';
   addTab.textContent = '+ table';
   addTab.addEventListener('click', openNewTableModal);
   tabsEl.appendChild(addTab);
 
-  const queryTab = document.createElement('div');
-  queryTab.className = 'tab tab-add';
+  const queryTab = document.createElement('li');
+  queryTab.className = 'table-item table-item-action';
   queryTab.textContent = '🖥 SQL';
   queryTab.addEventListener('click', openQueryModal);
   tabsEl.appendChild(queryTab);
 
-  const globalSearchTab = document.createElement('div');
-  globalSearchTab.className = 'tab tab-add';
+  const globalSearchTab = document.createElement('li');
+  globalSearchTab.className = 'table-item table-item-action';
   globalSearchTab.textContent = '🔎 Recherche globale';
   globalSearchTab.addEventListener('click', openGlobalSearchModal);
   tabsEl.appendChild(globalSearchTab);
@@ -703,7 +729,14 @@ function renderContent() {
 
   if (allRows.length === 0) {
     pagination.innerHTML = '';
+    // colonnes affichées même sans données — juste le nom et le type, sans
+    // les contrôles de tri/épinglage/gestion (non câblés sur ce chemin
+    // court, ça ferait des boutons visibles mais inertes)
+    const enteteVide = columns.map(col =>
+      `<th>${escapeHtml(col)}<span class="col-type-vide">${escapeHtml(columnTypes[col] || '')}</span></th>`
+    ).join('');
     content.innerHTML = `
+      <table class="table-vide"><thead><tr>${enteteVide}</tr></thead></table>
       <div class="empty-state">
         <div class="icon">∅</div>
         <div>Aucune donnée dans cette table</div>
@@ -3430,7 +3463,14 @@ enableDragReorder(document.getElementById('dbList'), '.db-item', 'vertical', (it
     body: JSON.stringify({ orderedIds })
   }).catch(err => console.error('Échec sauvegarde ordre des bases :', err));
 });
-enableDragReorder(document.getElementById('tabs'), '.tab:not(.tab-add)', 'horizontal', (items) => {
+// ciblé sur #dbList (stable, jamais recréé), pas #tableList : cet élément-là
+// est reconstruit à chaque renderSidebar() (nouvelle base sélectionnée,
+// renommage...), ce qui aurait détaché les écouteurs posés dessus après le
+// tout premier rendu — #dbList contient déjà .db-item avec son propre
+// enableDragReorder juste au-dessus ; les deux cohabitent sans conflit,
+// closest(itemSelector) ne matchant que l'élément pertinent selon ce qui
+// est réellement glissé
+enableDragReorder(document.getElementById('dbList'), '.table-item:not(.table-item-action)', 'vertical', (items) => {
   if (!currentDb) return;
   const orderedNames = items.map(el => el.dataset.tableName);
   currentDb.tables.sort((a, b) => orderedNames.indexOf(a.name) - orderedNames.indexOf(b.name));

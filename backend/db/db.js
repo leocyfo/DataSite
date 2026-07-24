@@ -27,6 +27,10 @@ function safeIdentifier(name) {
   return String(name).replace(/[^a-zA-Z0-9_]/g, '_');
 }
 
+function makeTableId() {
+  return `t${Date.now()}${Math.floor(Math.random() * 1000)}`;
+}
+
 function slugify(name) {
   return name
     .toString()
@@ -56,7 +60,14 @@ function listDatabases() {
     .slice()
     .sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
 
-  return registry.map(({ id, name, icon, tableOrder }) => {
+  // migration douce : les tables créées avant l'ajout des identifiants
+  // stables (tableIds) n'en ont pas encore — on en attribue un ici, à la
+  // première lecture, plutôt que d'exiger une migration à part. Persisté
+  // seulement si quelque chose a effectivement changé.
+  let migre = false;
+
+  const resultat = registry.map((entry) => {
+    const { id, name, icon, tableOrder } = entry;
     const db = getConnection(id);
     const existingTables = db.prepare(`
       SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'
@@ -70,14 +81,24 @@ function listDatabases() {
       ...existingTables.filter(n => !order.includes(n)),
     ];
 
-    const tableInfo = ordered.map(tableName => ({
-      name: tableName,
-      rowCount: db.prepare(`SELECT COUNT(*) as c FROM "${tableName}"`).get().c
-    }));
+    entry.tableIds = entry.tableIds || {};
+    const tableInfo = ordered.map(tableName => {
+      if (!entry.tableIds[tableName]) {
+        entry.tableIds[tableName] = makeTableId();
+        migre = true;
+      }
+      return {
+        name: tableName,
+        id: entry.tableIds[tableName],
+        rowCount: db.prepare(`SELECT COUNT(*) as c FROM "${tableName}"`).get().c,
+      };
+    });
 
-    const full = registry.find(d => d.id === id);
-    return { id, name, icon, tables: tableInfo, nodePositions: (full && full.nodePositions) || {} };
+    return { id, name, icon, tables: tableInfo, nodePositions: entry.nodePositions || {} };
   });
+
+  if (migre) saveRegistry(registry);
+  return resultat;
 }
 
 function createDatabase(name, icon) {
@@ -579,12 +600,15 @@ function createTable(dbId, tableName, columns) {
     )
   `);
 
-  // ajoute la nouvelle table à la fin de l'ordre sauvegardé
+  // ajoute la nouvelle table à la fin de l'ordre sauvegardé, avec un
+  // identifiant stable qui survivra à un futur renommage (voir renameTable)
   const registry = loadRegistry();
   const entry = registry.find(d => d.id === dbId);
   if (entry) {
     entry.tableOrder = entry.tableOrder || [];
     if (!entry.tableOrder.includes(safeTable)) entry.tableOrder.push(safeTable);
+    entry.tableIds = entry.tableIds || {};
+    if (!entry.tableIds[safeTable]) entry.tableIds[safeTable] = makeTableId();
     saveRegistry(registry);
   }
 
@@ -611,6 +635,9 @@ function dropTable(dbId, tableName) {
     }
     if (entry.nodePositions) {
       delete entry.nodePositions[safeTable];
+    }
+    if (entry.tableIds) {
+      delete entry.tableIds[safeTable];
     }
     if (entry.columnKinds) {
       delete entry.columnKinds[safeTable];
@@ -1017,6 +1044,14 @@ function renameTable(dbId, tableName, newTableName) {
     if (entry.nodePositions && entry.nodePositions[safeTable]) {
       entry.nodePositions[safeNewTable] = entry.nodePositions[safeTable];
       delete entry.nodePositions[safeTable];
+    }
+    if (entry.tableIds && entry.tableIds[safeTable]) {
+      // la valeur (l'identifiant stable) ne change pas, seule la clé suit le
+      // nouveau nom — c'est précisément ce qui permet à un code externe ayant
+      // mémorisé cet id (voir resolveTableId) de retrouver la table malgré
+      // le renommage
+      entry.tableIds[safeNewTable] = entry.tableIds[safeTable];
+      delete entry.tableIds[safeTable];
     }
     if (entry.columnKinds && entry.columnKinds[safeTable]) {
       entry.columnKinds[safeNewTable] = entry.columnKinds[safeTable];

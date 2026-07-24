@@ -1,15 +1,15 @@
 @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=Inter:wght@400;500;600;700&display=swap');
 
 :root{
-  --bg:        #14161a;
-  --panel:     #1b1e24;
-  --panel-2:   #21242b;
-  --border:    #2c3038;
-  --text:      #edeff2;
-  --text-dim:  #8b909c;
-  --accent:    #e8a33d;
-  --accent-dim:#7a5a2a;
-  --accent-soft: rgba(232, 163, 61, 0.12);
+  --bg:        #1c1a16;
+  --panel:     #26231d;
+  --panel-2:   #3a2f20;
+  --border:    #423d32;
+  --text:      #eeeae0;
+  --text-dim:  #b3ac9c;
+  --accent:    #e0954a;
+  --accent-dim:#8a5a2a;
+  --accent-soft: rgba(224, 149, 74, 0.16);
   --ok:        #4fbf7a;
   --ok-soft:   rgba(79, 191, 122, 0.12);
   --danger:    #e05a5a;
@@ -18,7 +18,7 @@
   /* texte sur fond --accent (boutons, badges) : toujours sombre, indépendant
      du thème — ne pas réutiliser --bg pour ça (casserait le contraste une
      fois --bg devenu clair en thème clair) */
-  --on-accent: #14161a;
+  --on-accent: #1c1a16;
   --font-ui:   'Inter', sans-serif;
   --font-mono: 'IBM Plex Mono', monospace;
   --radius-sm: 6px;
@@ -693,26 +693,49 @@ body.bottom-bar-resizing{
   letter-spacing:0.5px;
 }
 
-.tabs{
+/* liste des tables : imbriquée dans la sidebar sous la base sélectionnée
+   (voir #tableList, recréé à chaque renderSidebar()) plutôt qu'une rangée
+   d'onglets horizontale — celle-ci devenait illisible/inatteignable dès
+   qu'une base avait beaucoup de tables (17 dans Épicerie Tycoon) */
+.table-list-host{ list-style:none; }
+
+.table-list{
+  list-style:none;
   display:flex;
-  gap:2px;
-  padding:0 28px;
-  border-bottom:1px solid var(--border);
-  background:var(--panel);
+  flex-direction:column;
+  gap:1px;
+  padding:2px 0 6px 22px;
+  border-left:1px solid var(--border);
+  margin:0 0 0 22px;
 }
 
-.tab{
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding:10px 16px;
+.table-item{
+  display:flex;
+  align-items:center;
+  gap:8px;
+  padding:7px 10px;
   font-size:12px;
   font-family:var(--font-mono);
   color:var(--text-dim);
   cursor:pointer;
-  border-bottom:2px solid transparent;
-  transition:all 0.15s ease;
+  border-radius:var(--radius-sm);
+  transition:background 0.15s var(--ease), color 0.15s var(--ease);
 }
+.table-item span{ flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+
+.table-item:hover{ background:var(--panel-2); color:var(--text); }
+
+.table-item.active{
+  background:var(--accent-soft);
+  color:var(--accent);
+  font-weight:600;
+}
+
+.table-item-action{
+  color:var(--accent);
+  opacity:0.75;
+}
+.table-item-action:hover{ opacity:1; }
 
 .btn-delete-tab{
   display:none;
@@ -723,30 +746,15 @@ body.bottom-bar-resizing{
   cursor: pointer;
   line-height: 1;
   padding: 2px;
+  flex-shrink:0;
 }
 
-.tab:hover .btn-delete-tab{
+.table-item:hover .btn-delete-tab{
   display:inline-block;
 }
 
 .btn-delete-tab:hover{
   color: var(--danger);
-}
-
-.tab:hover{ color:var(--text); }
-
-.tab.active{
-  color:var(--accent);
-  border-bottom-color:var(--accent);
-}
-
-.tab-add{
-  color: var(--accent);
-  opacity: 0.7;
-}
-
-.tab-add:hover{
-  opacity: 1;
 }
 
 .db-empty{
@@ -829,6 +837,18 @@ tbody tr:hover .col-pinned{
 .empty-state .icon{
   font-size:32px;
   opacity:0.5;
+}
+
+/* table sans aucune ligne : on affiche quand même l'en-tête (noms/types de
+   colonnes), sans les contrôles de tri/épinglage/gestion — non câblés ici,
+   ça ferait des boutons visibles mais inertes */
+.table-vide{ width:100%; }
+.col-type-vide{
+  margin-left:6px;
+  font-size:9px;
+  color:var(--text-faint, var(--text-dim));
+  text-transform:none;
+  letter-spacing:normal;
 }
 
 ::-webkit-scrollbar{ width:10px; height:10px; }
@@ -1364,7 +1384,7 @@ tbody tr:hover .btn-expand-row{
 }
 
 .db-item:hover .btn-rename-db,
-.tab:hover .btn-rename-tab,
+.table-item:hover .btn-rename-tab,
 .db-item:hover .btn-export-db{
   display:inline-block;
 }
@@ -1547,11 +1567,11 @@ td.image-cell{
   cursor: grabbing;
 }
 
-.tab{
+.table-item{
   cursor: grab;
 }
 
-.tab.dragging{
+.table-item.dragging{
   opacity: 0.4;
   cursor: grabbing;
 }
